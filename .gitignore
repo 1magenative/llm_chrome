@@ -1,0 +1,6 @@
+node_modules
+dist
+.wxt
+web-ext.config.ts
+*.log
+.DS_Store
