@@ -33,11 +33,29 @@ export function actionSignature(actions: readonly ExecutedAction[]): string {
  * Детектор зацикливания: одно и то же действие на одной и той же странице N раз подряд.
  * На N — предупреждение (модель получит его в истории), на 2N — остановка.
  */
+export interface LoopSnapshot {
+  last: { signature: string; page: string } | null;
+  count: number;
+}
+
 export class LoopDetector {
   private last: { signature: string; page: string } | null = null;
   private count = 0;
 
-  constructor(private readonly threshold: number) {}
+  constructor(
+    private readonly threshold: number,
+    restore?: LoopSnapshot,
+  ) {
+    if (restore) {
+      this.last = restore.last;
+      this.count = restore.count;
+    }
+  }
+
+  /** Состояние для чекпоинта. */
+  snapshot(): LoopSnapshot {
+    return { last: this.last, count: this.count };
+  }
 
   get repeats(): number {
     return this.count;

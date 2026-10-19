@@ -217,17 +217,26 @@ export function normalizeAction(raw: unknown): ActionResult {
   }
 }
 
-function rootToStep(root: unknown): { raw: unknown[]; reasoning: string; expected: string } | null {
-  if (Array.isArray(root)) return { raw: root, reasoning: '', expected: '' };
+interface RawStep {
+  raw: unknown[];
+  reasoning: string;
+  expected: string;
+  risky: boolean;
+}
+
+function rootToStep(root: unknown): RawStep | null {
+  if (Array.isArray(root)) return { raw: root, reasoning: '', expected: '', risky: false };
   if (!isRecord(root)) return null;
   const reasoning = toText(pick(root, 'reasoning', 'thought', 'thoughts', 'reason', 'thinking')) ?? '';
   const expected = toText(pick(root, 'expected_outcome', 'expected', 'expectation', 'expected_result')) ?? '';
+  const flag = pick(root, 'risky', 'irreversible', 'needs_confirmation');
+  const risky = flag === true || flag === 'true';
   const actions = root.actions;
-  if (Array.isArray(actions)) return { raw: actions, reasoning, expected };
-  if (isRecord(actions)) return { raw: [actions], reasoning, expected };
+  if (Array.isArray(actions)) return { raw: actions, reasoning, expected, risky };
+  if (isRecord(actions)) return { raw: [actions], reasoning, expected, risky };
   // Одно действие прямо в корне.
-  if (normalizeAction(root).ok) return { raw: [root], reasoning, expected };
-  if (isRecord(root.action)) return { raw: [root.action], reasoning, expected };
+  if (normalizeAction(root).ok) return { raw: [root], reasoning, expected, risky };
+  if (isRecord(root.action)) return { raw: [root.action], reasoning, expected, risky };
   return null;
 }
 
@@ -284,7 +293,9 @@ export function parseAgentStep(text: string, maxActions: number): ParseResult {
       warnings.push(`dropped ${actions.length - maxActions} action(s) over the limit of ${maxActions}`);
       actions.length = maxActions;
     }
-    return { ok: true, step: { reasoning: root.reasoning, expected_outcome: root.expected, actions }, warnings };
+    const step: AgentStep = { reasoning: root.reasoning, expected_outcome: root.expected, actions };
+    if (root.risky) step.risky = true;
+    return { ok: true, step, warnings };
   }
   return { ok: false, error: lastError };
 }

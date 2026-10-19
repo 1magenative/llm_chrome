@@ -1,6 +1,6 @@
 import { browser } from '#imports';
 import type { StepEvent } from './agent/step';
-import type { ActionResult, RunState, RunSummary, StepDetail } from './agent/types';
+import type { ActionResult, DeferredItem, RunState, RunSummary, StepDetail } from './agent/types';
 import type { ClickPoint } from './dom/act';
 import type { Rect } from './dom/types';
 import type { FrameChildTag, RawFrameObservation } from './frames';
@@ -49,6 +49,19 @@ export interface FrameInfo {
   viewport: { width: number; height: number };
 }
 
+/** Элемент, выбранный мышью для «Скрыть от модели». */
+export interface HidePick {
+  /** `button.prisma-button "Мои курсы"` — чтобы человек узнал элемент. */
+  element: string;
+  /** Предложенное правило: текст или `css: селектор`. */
+  rule: string;
+  /** Сколько элементов на странице попадает под правило. */
+  matches: number;
+  /** Элемент уже скрыт существующим правилом. */
+  alreadyHidden: boolean;
+  url: string;
+}
+
 /** background → content script */
 export type ContentRequest =
   | { type: 'content:ping' }
@@ -68,6 +81,8 @@ export type ContentRequest =
   /** Режим выбора элемента мышью; ответ приходит после клика (null — отмена по Esc). */
   | { type: 'content:pick'; maxChars: number; hide: string[] }
   | { type: 'content:pick-cancel' }
+  /** Выбор элемента мышью, чтобы скрыть его от модели: ответ — предложенное правило. */
+  | { type: 'content:pick-rule'; maxChars: number; hide: string[] }
   | { type: 'content:act'; action: DomAction; snapshotId: number };
 
 /** UI → background */
@@ -81,10 +96,27 @@ export type BackgroundRequest =
   | { type: 'bg:run-get' }
   | { type: 'bg:run-detail'; runId: string; n: number }
   | { type: 'bg:runs-list' }
-  | { type: 'bg:run-export'; runId: string };
+  | { type: 'bg:run-export'; runId: string }
+  /** Прерванный перезапуском запуск: продолжить или забыть. */
+  | { type: 'bg:run-recover'; command: 'resume' | 'discard' }
+  | { type: 'bg:queue-list' }
+  /** Утром: начать обычный запуск с отложенного действия. */
+  | { type: 'bg:queue-resume'; id: string; windowId: number }
+  | { type: 'bg:queue-dismiss'; id: string }
+  /** Проверить звук и уведомление из настроек. */
+  | { type: 'bg:alert-test' };
+
+/** Текущий запуск для панели; interrupted — прерван перезапуском и ждёт «Продолжить». */
+export interface RunInfo {
+  state: RunState;
+  interrupted: boolean;
+}
 
 /** background → UI (широковещательно всем страницам расширения) */
-export type UiEvent = { type: 'ui:step-progress'; event: StepEvent } | { type: 'ui:run-state'; state: RunState };
+export type UiEvent =
+  | { type: 'ui:step-progress'; event: StepEvent }
+  | { type: 'ui:run-state'; info: RunInfo }
+  | { type: 'ui:queue-changed' };
 
 export function isUiEvent(msg: unknown): msg is UiEvent {
   return hasType(msg, 'ui:');
@@ -106,6 +138,7 @@ export interface ContentResponses {
   'content:highlight': null;
   'content:pick': Diagnosis | null;
   'content:pick-cancel': null;
+  'content:pick-rule': HidePick | null;
   'content:act': ActionResult;
 }
 
@@ -116,10 +149,15 @@ export interface BackgroundResponses {
   'bg:run-control': null;
   'bg:run-approve': null;
   'bg:run-answer': null;
-  'bg:run-get': RunState | null;
+  'bg:run-get': RunInfo | null;
   'bg:run-detail': StepDetail | null;
   'bg:runs-list': RunSummary[];
   'bg:run-export': unknown;
+  'bg:run-recover': null;
+  'bg:queue-list': DeferredItem[];
+  'bg:queue-resume': RunState;
+  'bg:queue-dismiss': null;
+  'bg:alert-test': null;
 }
 
 function hasType(msg: unknown, prefix: string): msg is { type: string } {

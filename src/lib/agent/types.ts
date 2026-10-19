@@ -1,6 +1,10 @@
+import type { ElementFlag } from '../dom/types';
 import type { FrameNode } from '../frames';
 import type { StructuredFormat } from '../llm/client';
 import type { AgentAction } from './actions';
+import type { LoopSnapshot } from './loop';
+import type { RiskReason } from './risk';
+import type { StuckState } from './stuck';
 
 export type RunStatus =
   | 'running'
@@ -11,9 +15,11 @@ export type RunStatus =
   | 'asking_user'
   | 'done'
   | 'failed'
-  | 'stopped';
+  | 'stopped'
+  /** Автономный режим: всё, что осталось, ждёт подтверждения в очереди на утро. */
+  | 'deferred';
 
-export const TERMINAL_STATUSES: ReadonlySet<RunStatus> = new Set(['done', 'failed', 'stopped']);
+export const TERMINAL_STATUSES: ReadonlySet<RunStatus> = new Set(['done', 'failed', 'stopped', 'deferred']);
 
 /** Как найти элемент по номеру из наблюдения: в каком фрейме и в каком снимке он живёт. */
 export interface ObservationHandle {
@@ -22,6 +28,8 @@ export interface ObservationHandle {
   owner: Record<number, number>;
   /** Дерево фреймов — для пересчёта координат iframe перед кликом. */
   nodes: FrameNode[];
+  /** Признаки элементов для оценки риска (номер → флаги). */
+  flags?: Record<number, ElementFlag[]>;
 }
 
 export interface ActionResult {
@@ -38,6 +46,8 @@ export interface ExecutedAction {
   target?: string;
   result?: ActionResult;
   skipped?: string;
+  /** Почему действие сочтено рискованным (см. lib/agent/risk.ts). */
+  risk?: RiskReason[];
 }
 
 export interface StepLlmInfo {
@@ -81,6 +91,8 @@ export interface StepDetail {
 export interface PendingApproval {
   actions: ExecutedAction[];
   reasoning: string;
+  /** Автономный режим: если до этого момента (ms) никто не ответит, рискованное уйдёт в очередь. */
+  deadline?: number;
 }
 
 export interface RunState {
@@ -101,6 +113,38 @@ export interface RunState {
   error?: string;
   /** Пауза запрошена, но вступит в силу после текущей операции. */
   pauseRequested?: boolean;
+  /** Автономный (ночной) режим этого запуска. */
+  autonomous?: boolean;
+  // ——— чекпоинт: всё, что нужно, чтобы продолжить после перезапуска ———
+  /** Какое действие выполняется прямо сейчас (пишется до выполнения). */
+  inFlight?: { step: number; action: number };
+  loop?: LoopSnapshot;
+  /** Отпечатки отложенных в очередь действий — чтобы не откладывать одно и то же дважды. */
+  deferredKeys?: string[];
+  /** Шагов подряд, упёршихся в отложенное/запрещённое действие. */
+  deferStreak?: number;
+  /** Сколько раз запуск продолжали после перезапуска браузера/воркера. */
+  restarts?: number;
+  /** Детектор застревания (см. stuck.ts). */
+  stuck?: StuckState;
+}
+
+/** Действие, отложенное в автономном режиме до подтверждения человеком («очередь на утро»). */
+export interface DeferredItem {
+  id: string;
+  runId: string;
+  task: string;
+  createdAt: number;
+  step: number;
+  url: string;
+  title: string;
+  /** Отложенные действия (рискованное и всё после него в цепочке). */
+  actions: ExecutedAction[];
+  reasoning: string;
+  expectedOutcome: string;
+  /** Что агент успел сохранить через extract к этому моменту. */
+  extracted: string[];
+  status: 'pending' | 'resumed' | 'dismissed';
 }
 
 /** Строка журнала запусков. */

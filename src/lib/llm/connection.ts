@@ -1,10 +1,11 @@
 import type { LlmProfile } from '../settings';
 import { authHeaders, chatStream, describeError, HttpError, type FetchFn } from './client';
-import { apiUrl, normalizeBaseUrl } from './url';
+import { providerInfo } from './providers';
+import { apiUrl, isLocalHost, normalizeBaseUrl, serverRoot } from './url';
 
 export { describeError, HttpError, parseChunkDelta, type FetchFn } from './client';
 
-export type ServerKind = 'ollama' | 'llama.cpp' | 'unknown';
+export type ServerKind = 'ollama' | 'llama.cpp' | 'google' | 'unknown';
 
 export interface ServerInfo {
   kind: ServerKind;
@@ -16,6 +17,8 @@ export interface ServerInfo {
 export interface ConnectionReport {
   ok: boolean;
   baseUrl: string;
+  /** Адрес, по которому реально пойдут запросы — чтобы было видно, куда расширение стучится. */
+  endpoint?: string;
   latencyMs?: number;
   models: string[];
   /** Идентификатор модели на сервере, сопоставленный с настройкой (например qwen3 → qwen3:latest). */
@@ -45,18 +48,22 @@ async function getJson(
   return res.json();
 }
 
+/** Gemini отдаёт идентификаторы с приставкой `models/` — в запросах она не нужна. */
+export const bareModelId = (id: string) => id.replace(/^models\//, '');
+
 export function parseModelList(json: unknown): string[] {
   if (!isRecord(json) || !Array.isArray(json.data)) return [];
   return json.data
-    .map((m) => (isRecord(m) && typeof m.id === 'string' ? m.id : null))
+    .map((m) => (isRecord(m) && typeof m.id === 'string' ? bareModelId(m.id) : null))
     .filter((id): id is string => id !== null);
 }
 
 /** Ищет модель среди доступных; для Ollama имя без тега означает `:latest`. */
 export function resolveModel(wanted: string, models: readonly string[]): string | undefined {
-  if (models.includes(wanted)) return wanted;
-  if (!wanted.includes(':') && models.includes(`${wanted}:latest`)) return `${wanted}:latest`;
-  const lower = wanted.toLowerCase();
+  const bare = bareModelId(wanted);
+  if (models.includes(bare)) return bare;
+  if (!bare.includes(':') && models.includes(`${bare}:latest`)) return `${bare}:latest`;
+  const lower = bare.toLowerCase();
   return models.find((m) => m.toLowerCase() === lower);
 }
 
@@ -125,9 +132,13 @@ export async function checkConnection(profile: LlmProfile, fetchImpl: FetchFn = 
     return report;
   }
 
+  const provider = providerInfo(profile.provider);
+  // Чужой сервер в интернете не опрашиваем на Ollama/llama.cpp: это лишние запросы с вашим ключом.
+  const remote = provider.cloud || !isLocalHost(baseUrl);
+  report.endpoint = apiUrl(baseUrl, '/chat/completions', provider.apiPrefix);
   const started = performance.now();
   try {
-    const json = await getJson(apiUrl(baseUrl, '/models'), profile, 10_000, fetchImpl);
+    const json = await getJson(apiUrl(baseUrl, '/models', provider.apiPrefix), profile, 10_000, fetchImpl);
     report.latencyMs = Math.round(performance.now() - started);
     report.models = parseModelList(json);
   } catch (err) {
@@ -136,15 +147,22 @@ export async function checkConnection(profile: LlmProfile, fetchImpl: FetchFn = 
   }
 
   report.resolvedModel = resolveModel(profile.model, report.models);
-  report.server =
-    (await detectOllama(baseUrl, profile, report.resolvedModel, fetchImpl)) ??
-    (await detectLlamaCpp(baseUrl, profile, fetchImpl)) ??
-    { kind: 'unknown' };
+  // Ollama и llama.cpp отвечают на свои пути от корня, а не от /v1.
+  const root = serverRoot(baseUrl);
+  report.server = remote
+    ? { kind: provider.id === 'google' ? 'google' : 'unknown' }
+    : ((await detectOllama(root, profile, report.resolvedModel, fetchImpl)) ??
+      (await detectLlamaCpp(root, profile, fetchImpl)) ?? { kind: 'unknown' });
+
+  if (provider.keyRequired && !profile.apiKey) {
+    report.warnings.push('Для этого провайдера нужен API-ключ — без него генерация не пойдёт.');
+  }
 
   if (!report.resolvedModel) {
-    if (report.server.kind === 'llama.cpp') {
-      // llama-server обслуживает загруженную модель независимо от поля model.
-      report.warnings.push(`Модель «${profile.model}» не найдена в /v1/models; llama-server всё равно ответит загруженной моделью.`);
+    if (report.server.kind === 'llama.cpp' || (remote && report.models.length === 0)) {
+      // llama-server обслуживает загруженную модель независимо от поля model;
+      // некоторые сервисы вообще не отдают список — проверить имя модели нечем.
+      report.warnings.push(`Модель «${profile.model}» не найдена в списке моделей; сервер может всё равно ответить ей.`);
     } else {
       report.error = `Модель «${profile.model}» не найдена на сервере.`;
       return report;

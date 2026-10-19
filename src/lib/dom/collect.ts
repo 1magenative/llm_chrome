@@ -1,6 +1,7 @@
 import type { ElementStyle, Geometry } from './geometry';
+import { hasRules, isHiddenByRules, parseHideRules } from './hide-rules';
 import { collapseWhitespace, safeDecodeUri } from './serialize';
-import type { CollectStats, ElementInfo, PageSnapshot, Rect, Zone } from './types';
+import type { CollectStats, ElementFlag, ElementInfo, PageSnapshot, Rect, Zone } from './types';
 
 /** Связь номера элемента с живым DOM-узлом — нужна исполнителю действий. */
 export interface RegistryEntry {
@@ -21,7 +22,7 @@ export interface CollectOptions {
   maxNodes?: number;
   /** Если передан, сюда пишется решение по каждому обойдённому элементу (для диагностики). */
   trace?: Map<Element, TraceVerdict>;
-  /** Тексты элементов (нижний регистр), которые пользователь велел скрыть от модели. */
+  /** «Скрыть от модели» из заметки для сайта: строки-правила (текст или `css: селектор`, см. hide-rules.ts). */
   hideNames?: readonly string[];
   /**
    * Сбор внутри iframe с другого сайта: где этот документ лежит в верхней странице.
@@ -68,6 +69,9 @@ const LEAF_CONTROLS = new Set(['input', 'textarea', 'select', 'svg', 'video', 'a
 const CONTROL_ROLES = new Set(['checkbox', 'radio', 'switch', 'textbox', 'searchbox', 'combobox', 'slider', 'spinbutton']);
 const CLICK_ROLES = new Set(['button', 'link', 'tab', 'menuitem', 'menuitemcheckbox', 'menuitemradio', 'option', 'treeitem', 'gridcell']);
 /** Типы input, у которых показываем value. */
+/** Теги, у которых имеет смысл проверять текстовые правила «Скрыть от модели» при сборе текста. */
+const TEXT_RULE_TARGET = /^(a|button|summary|input|select|textarea|label)$/;
+
 const NO_VALUE_INPUTS = new Set(['checkbox', 'radio', 'submit', 'button', 'reset', 'image', 'file']);
 const BUTTON_INPUTS = new Set(['submit', 'button', 'reset']);
 
@@ -342,6 +346,27 @@ function isMasked(el: Element): boolean {
   return type === 'password' || /\bcc-/.test(autocomplete);
 }
 
+const SECRET_FIELDS = 'input[type=password], input[autocomplete^="cc-"], input[autocomplete*=" cc-"]';
+const SEARCH_HINT = /search|поиск|найти|искать/i;
+
+/** Признаки для оценки риска (см. ElementFlag). */
+export function riskFlags(el: Element): ElementFlag[] {
+  const flags: ElementFlag[] = [];
+  const tag = el.localName;
+  const type = tag === 'input' ? (el as HTMLInputElement).type : tag === 'button' ? (el as HTMLButtonElement).type : '';
+  if (tag === 'input' && isMasked(el)) flags.push('secret');
+  const form = (el as HTMLInputElement).form ?? el.closest('form');
+  if (form && (type === 'submit' || type === 'image')) flags.push('submit');
+  if (form?.querySelector(SECRET_FIELDS)) flags.push('form-secret');
+  const role = attr(el, 'role')?.toLowerCase() ?? '';
+  const hints = [attr(el, 'placeholder'), attr(el, 'aria-label'), attr(el, 'name'), form?.getAttribute('action'), form?.getAttribute('role')].join(' ');
+  if (type === 'search' || role === 'searchbox' || el.closest('[role=search]') || ((tag === 'input' || role === 'combobox') && SEARCH_HINT.test(hints))) {
+    flags.push('search');
+  }
+  if (tag === 'textarea' || isEditableHost(el)) flags.push('message');
+  return flags;
+}
+
 function describe(el: Element, geom: Geometry): Omit<ElementInfo, 'index' | 'zone' | 'distance' | 'rect'> {
   const tag = el.localName;
   const role = attr(el, 'role')?.toLowerCase() || undefined;
@@ -399,6 +424,8 @@ function describe(el: Element, geom: Geometry): Omit<ElementInfo, 'index' | 'zon
   const expanded = attr(el, 'aria-expanded');
   if (expanded === 'true') info.states.push('expanded');
   else if (expanded === 'false') info.states.push('collapsed');
+  const flags = riskFlags(el);
+  if (flags.length) info.flags = flags;
   return info;
 }
 
@@ -515,7 +542,24 @@ export function collectSnapshot(doc: Document, geom: Geometry, opts: CollectOpti
   const tabindexOnly: boolean[] = [];
   let scroller: { el: Element; area: number } | null = null;
   const stats: CollectStats = { nodesVisited: 0, walkTruncated: false, covered: 0, offscreen: 0, hidden: 0, userHidden: 0 };
-  const hideNames = opts.hideNames ?? [];
+  const hideRules = parseHideRules(opts.hideNames ?? []);
+  const hiding = hasRules(hideRules);
+  const hiddenCache = new Map<Element, boolean>();
+  /**
+   * Скрыт ли элемент заметкой «Скрыть от модели». CSS-правила проверяются у любого элемента,
+   * текстовые — только у похожих на кнопки/ссылки/поля (имя считать дорого).
+   */
+  const userHidden = (el: Element, interactive: boolean): boolean => {
+    if (!hiding) return false;
+    const cached = hiddenCache.get(el);
+    if (cached !== undefined) return cached;
+    let hidden = hideRules.selectors.length > 0 && isHiddenByRules(el, '', { texts: [], selectors: hideRules.selectors });
+    if (!hidden && hideRules.texts.length > 0 && (interactive || TEXT_RULE_TARGET.test(el.localName) || el.hasAttribute('role') || el.hasAttribute('onclick'))) {
+      hidden = isHiddenByRules(el, accessibleName(el, geom), { texts: hideRules.texts, selectors: [] });
+    }
+    hiddenCache.set(el, hidden);
+    return hidden;
+  };
   /** Строки текста: куски текста и ссылки на элементы (номера известны только после обхода). */
   const textLines: TextSeg[][] = [];
   const linePreviews: string[] = [];
@@ -595,13 +639,6 @@ export function collectSnapshot(doc: Document, geom: Geometry, opts: CollectOpti
     // label спрятанного переключателя показываем как сам переключатель (с его checked), кликаем label.
     const subject = detected.control ?? el;
     const described = detected.editor ? describeEditor(el) : describe(subject, geom);
-    // «Скрыть от модели» из заметки для сайта: элемент не видно и нажать нельзя.
-    const lowerName = described.name.toLowerCase();
-    if (hideNames.length && lowerName && hideNames.some((h) => lowerName.includes(h))) {
-      stats.userHidden++;
-      trace?.set(el, { kind: 'skipped', reason: 'user-hidden' });
-      return true;
-    }
     const index = elements.length + 1;
     const info: ElementInfo = { ...described, index, zone: place.zone, distance: Math.round(place.distance), rect };
     if (ctx.frames.length > 0 || opts.frame) info.inFrame = true;
@@ -634,7 +671,7 @@ export function collectSnapshot(doc: Document, geom: Geometry, opts: CollectOpti
         if (t.trim()) plain = true;
       } else if (child.nodeType === ELEMENT_NODE) {
         const c = child as Element;
-        if (SKIP_TAGS.has(c.localName) || opts.ignore?.(c) || c.hasAttribute('hidden')) {
+        if (SKIP_TAGS.has(c.localName) || opts.ignore?.(c) || c.hasAttribute('hidden') || userHidden(c, false)) {
           segs.push(' ');
           continue;
         }
@@ -699,6 +736,12 @@ export function collectSnapshot(doc: Document, geom: Geometry, opts: CollectOpti
       trace?.set(el, { kind: 'skipped', reason: 'display-none' });
       return;
     }
+    // «Скрыть от модели» по CSS-селектору: элемент вырезается целиком, с текстом и содержимым.
+    if (hideRules.selectors.length && userHidden(el, false)) {
+      stats.userHidden++;
+      trace?.set(el, { kind: 'skipped', reason: 'user-hidden' });
+      return;
+    }
 
     let detected: Detected | null;
     if (representedControls.has(el) || representedLabels.has(el)) {
@@ -711,6 +754,12 @@ export function collectSnapshot(doc: Document, geom: Geometry, opts: CollectOpti
       // Подпись видимого поля/кружка — не отдельный элемент: модель увидит само поле с этой подписью.
       else if (tag === 'label' && labelsVisibleControl(el)) detected = null;
       else detected = detectInteractive(el, style, ctx);
+    }
+    // «Скрыть от модели» по тексту: модель не видит ни элемента, ни его текста, ни того, что внутри.
+    if (detected && !detected.editor && hideRules.texts.length && (userHidden(el, true) || (detected.control !== undefined && userHidden(detected.control, true)))) {
+      stats.userHidden++;
+      trace?.set(el, { kind: 'skipped', reason: 'user-hidden' });
+      return;
     }
     if (detected && !addCandidate(el, detected, ctx)) detected = null;
     if (!detected && trace && !trace.has(el)) {

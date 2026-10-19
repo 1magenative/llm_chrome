@@ -16,7 +16,8 @@ export default defineConfig({
     host_permissions: ['<all_urls>'],
     // scripting — внедрение content script по требованию, а не во все страницы подряд.
     // debugger — настоящие (isTrusted) клики и ввод через CDP, в том числе внутри iframe с других сайтов.
-    permissions: ['storage', 'sidePanel', 'scripting', 'debugger'],
+    // offscreen + notifications — звуковой сигнал и уведомление, когда ночью агенту нужно подтверждение.
+    permissions: ['storage', 'sidePanel', 'scripting', 'debugger', 'offscreen', 'notifications'],
     action: {
       default_title: 'Открыть панель агента',
     },

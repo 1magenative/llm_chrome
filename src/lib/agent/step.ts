@@ -5,7 +5,12 @@ import { buildStepMessages, correctionMessage, estimateTokens, type TabInfo } fr
 
 export interface StepDeps {
   observe(): Promise<{ observation: string; tabs: TabInfo[]; url?: string }>;
-  chat(messages: ChatMessage[], schema: Record<string, unknown>, onDelta: (d: ChatDelta) => void): Promise<ChatResult>;
+  chat(
+    messages: ChatMessage[],
+    schema: Record<string, unknown>,
+    onDelta: (d: ChatDelta) => void,
+    onRetry: (info: { attempt: number; waitMs: number; error: string }) => void,
+  ): Promise<ChatResult>;
 }
 
 export interface StepInput {
@@ -39,7 +44,9 @@ export type StepEvent =
   | { phase: 'observe' }
   | { phase: 'llm'; attempt: number }
   | { phase: 'delta'; attempt: number; content: string; reasoning: string }
-  | { phase: 'parse-error'; attempt: number; error: string };
+  | { phase: 'parse-error'; attempt: number; error: string }
+  /** Сервис перегружен: ждём waitMs и повторяем тот же запрос. */
+  | { phase: 'service-retry'; attempt: number; waitMs: number; error: string };
 
 export interface StepOutcome {
   observation: string;
@@ -72,7 +79,12 @@ export async function runStep(input: StepInput, deps: StepDeps, onEvent: (e: Ste
 
   for (let attempt = 1; attempt <= input.maxRetries + 1; attempt++) {
     onEvent({ phase: 'llm', attempt });
-    const res = await deps.chat(messages, schema, (d) => onEvent({ phase: 'delta', attempt, ...d }));
+    const res = await deps.chat(
+      messages,
+      schema,
+      (d) => onEvent({ phase: 'delta', attempt, ...d }),
+      (info) => onEvent({ phase: 'service-retry', ...info }),
+    );
     const record: StepAttempt = {
       content: res.content,
       reasoning: res.reasoning,

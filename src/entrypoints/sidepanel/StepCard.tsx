@@ -1,5 +1,6 @@
 import { useState } from 'preact/hooks';
 import { formatAction } from '@/lib/agent/actions';
+import { RISK_LABELS } from '@/lib/agent/risk';
 import type { ExecutedAction, StepDetail, StepRecord } from '@/lib/agent/types';
 import { sendToBackground } from '@/lib/messages';
 
@@ -23,6 +24,11 @@ export function ActionLine({ a }: { a: ExecutedAction }) {
         {icon} {formatAction(a.action)}
       </span>
       {a.target && <span class="muted"> → {a.target}</span>}
+      {a.risk?.map((r, i) => (
+        <div key={i} class="risk">
+          ⚠ {RISK_LABELS[r.kind]}: {r.why}
+        </div>
+      ))}
       {a.result && !a.result.ok && <div class="err">{a.result.message}</div>}
       {a.result?.ok && a.result.message !== 'ok' && a.result.message !== 'clicked' && <div class="muted">{a.result.message}</div>}
       {a.skipped && <div class="muted">пропущено: {a.skipped}</div>}

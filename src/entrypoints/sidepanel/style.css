@@ -167,3 +167,38 @@ button.link {
 .status-paused {
   border-color: var(--warn);
 }
+
+.approval.risky {
+  border-color: var(--err);
+  border-width: 2px;
+}
+
+.risk {
+  color: var(--err);
+  font-size: 12px;
+}
+
+.queue ul {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.queue li {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.queue li + li {
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+.queue summary {
+  cursor: pointer;
+  font-weight: 600;
+}

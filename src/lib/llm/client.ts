@@ -1,4 +1,5 @@
 import { parseExtraBody, type LlmProfile } from '../settings';
+import { providerInfo } from './providers';
 import { readSse } from './sse';
 import { apiUrl, normalizeBaseUrl } from './url';
 
@@ -25,6 +26,8 @@ export interface ChatOptions {
   maxTokens?: number;
   signal?: AbortSignal;
   onDelta?: (delta: ChatDelta) => void;
+  /** Сервис перегружен, ждём и повторяем — чтобы показать это в панели. */
+  onRetry?: (info: { attempt: number; waitMs: number; error: string }) => void;
   fetchImpl?: FetchFn;
 }
 
@@ -48,10 +51,21 @@ export class HttpError extends Error {
     readonly status: number,
     readonly body: string,
     readonly url: string,
+    /** Заголовок Retry-After, если сервер его прислал, в миллисекундах. */
+    readonly retryAfterMs?: number,
   ) {
     super(`HTTP ${status}`);
     this.name = 'HttpError';
   }
+}
+
+/** Retry-After: секунды или HTTP-дата. */
+export function parseRetryAfter(header: string | null, now = Date.now()): number | undefined {
+  if (!header) return undefined;
+  const seconds = Number(header.trim());
+  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
+  const at = Date.parse(header);
+  return Number.isNaN(at) ? undefined : Math.max(0, at - now);
 }
 
 export function authHeaders(profile: Pick<LlmProfile, 'apiKey'>): Record<string, string> {
@@ -63,7 +77,14 @@ export function describeError(err: unknown): string {
   if (err instanceof HttpError) {
     const body = err.body.trim().slice(0, 300);
     const tail = body ? ` Ответ сервера: ${body}` : '';
+    if (/API_KEY_INVALID|API key not valid|api key expired/i.test(err.body)) {
+      return `Неверный API-ключ.${tail}`;
+    }
     switch (err.status) {
+      case 429:
+        return `429: слишком много запросов или кончилась квота.${tail}`;
+      case 503:
+        return `503: сервис перегружен и временно недоступен.${tail}`;
       case 401:
         return `401: неверный или отсутствующий API-ключ.${tail}`;
       case 403:
@@ -99,31 +120,40 @@ export function parseChunkDelta(json: unknown): ChatDelta {
   return { content, reasoning };
 }
 
-/** Тело запроса /v1/chat/completions для заданного способа structured output. */
+/**
+ * Тело запроса /chat/completions. lean — без необязательных полей (счётчик токенов,
+ * переключатель рассуждений): такой запрос переживает сервер, который их не понимает.
+ */
 export function buildRequestBody(
   profile: LlmProfile,
   messages: ChatMessage[],
   format: StructuredFormat,
   schema?: Record<string, unknown>,
   maxTokens?: number,
+  lean = false,
 ): Record<string, unknown> {
   const body: Record<string, unknown> = {
     model: profile.model,
     messages,
     stream: true,
-    stream_options: { include_usage: true },
     temperature: profile.temperature,
     max_tokens: maxTokens ?? profile.maxOutputTokens,
   };
+  if (!lean) body.stream_options = { include_usage: true };
   if (format === 'json_schema' && schema) {
     body.response_format = { type: 'json_schema', json_schema: { name: 'agent_step', strict: true, schema } };
   } else if (format === 'json_object') {
     body.response_format = { type: 'json_object' };
   }
-  if (!profile.thinking) {
-    // Разные серверы понимают разные ключи; лишние они игнорируют.
-    body.chat_template_kwargs = { enable_thinking: false };
-    body.think = false;
+  if (!profile.thinking && !lean) {
+    if (providerInfo(profile.provider).id === 'google') {
+      // У Gemini рассуждения выключает reasoning_effort: none (у Pro и 3.x — не выключаются вовсе).
+      body.reasoning_effort = 'none';
+    } else {
+      // Разные серверы понимают разные ключи; лишние они игнорируют.
+      body.chat_template_kwargs = { enable_thinking: false };
+      body.think = false;
+    }
   }
   return { ...body, ...parseExtraBody(profile.extraBody) };
 }
@@ -137,11 +167,34 @@ export function isFormatRejection(err: unknown): boolean {
   );
 }
 
+/** Временная неполадка на стороне сервиса: перегрузка, лимит, сбой шлюза. Повтор имеет смысл. */
+export function isTransientError(err: unknown): boolean {
+  if (err instanceof DOMException && err.name === 'TimeoutError') return false; // таймаут настраивается отдельно
+  if (err instanceof TypeError) return true; // сеть моргнула
+  if (!(err instanceof HttpError)) return false;
+  if (isFormatRejection(err) || isOptionalFieldRejection(err)) return false;
+  return [408, 429, 500, 502, 503, 504, 529].includes(err.status);
+}
+
+/** Сервер не понял необязательное поле запроса — стоит повторить без них (lean). */
+export function isOptionalFieldRejection(err: unknown): boolean {
+  return (
+    err instanceof HttpError &&
+    [400, 422].includes(err.status) &&
+    /stream_options|include_usage|chat_template_kwargs|enable_thinking|reasoning_effort|"think"/i.test(err.body)
+  );
+}
+
 /** Какой формат сработал у сервера+модели — чтобы не наступать на отказ каждый шаг. */
 const workingFormat = new Map<string, StructuredFormat>();
+/** Серверы, которым нельзя слать необязательные поля. */
+const leanServers = new Set<string>();
+
+const cacheKey = (profile: LlmProfile) => `${profile.baseUrl}|${profile.model}`;
 
 export function resetFormatCache(): void {
   workingFormat.clear();
+  leanServers.clear();
 }
 
 function formatsToTry(profile: LlmProfile, hasSchema: boolean): StructuredFormat[] {
@@ -155,27 +208,29 @@ function formatsToTry(profile: LlmProfile, hasSchema: boolean): StructuredFormat
       return ['none'];
     case 'auto': {
       const all: StructuredFormat[] = ['json_schema', 'json_object', 'none'];
-      const cached = workingFormat.get(`${profile.baseUrl}|${profile.model}`);
+      const cached = workingFormat.get(cacheKey(profile));
       return cached ? all.slice(all.indexOf(cached)) : all;
     }
   }
 }
 
-async function streamOnce(opts: ChatOptions, format: StructuredFormat, signal: AbortSignal): Promise<ChatResult> {
+async function streamOnce(opts: ChatOptions, format: StructuredFormat, signal: AbortSignal, lean: boolean): Promise<ChatResult> {
   const { profile } = opts;
   const fetchImpl = opts.fetchImpl ?? fetch;
   const baseUrl = normalizeBaseUrl(profile.baseUrl);
   if (!baseUrl) throw new Error('Некорректный адрес сервера.');
-  const url = apiUrl(baseUrl, '/chat/completions');
+  const url = apiUrl(baseUrl, '/chat/completions', providerInfo(profile.provider).apiPrefix);
   const started = performance.now();
 
   const res = await fetchImpl(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream', ...authHeaders(profile) },
-    body: JSON.stringify(buildRequestBody(profile, opts.messages, format, opts.schema, opts.maxTokens)),
+    body: JSON.stringify(buildRequestBody(profile, opts.messages, format, opts.schema, opts.maxTokens, lean)),
     signal,
   });
-  if (!res.ok) throw new HttpError(res.status, await res.text().catch(() => ''), url);
+  if (!res.ok) {
+    throw new HttpError(res.status, await res.text().catch(() => ''), url, parseRetryAfter(res.headers.get('Retry-After')));
+  }
   if (!res.body) throw new Error('Пустое тело ответа.');
 
   const result: ChatResult = { content: '', reasoning: '', format, totalMs: 0 };
@@ -211,8 +266,65 @@ async function streamOnce(opts: ChatOptions, format: StructuredFormat, signal: A
   return result;
 }
 
+/** Сколько раз повторять запрос при перегрузке сервиса и сколько ждать перед повтором. */
+export const TRANSIENT_ATTEMPTS = 3;
+const TRANSIENT_DELAYS_MS = [2000, 6000];
+
+export function transientDelay(attempt: number, retryAfterMs?: number): number {
+  const base = TRANSIENT_DELAYS_MS[attempt - 1] ?? TRANSIENT_DELAYS_MS.at(-1)!;
+  // Указание сервера важнее, но не ждём дольше минуты внутри одного шага.
+  const ms = Math.max(retryAfterMs ?? base, base);
+  // Разброс, чтобы несколько вкладок не долбили сервер синхронно; в сумме не дольше минуты.
+  return Math.min(Math.round(ms * (0.8 + Math.random() * 0.4)), 60_000);
+}
+
+function sleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) return reject(signal.reason as Error);
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason as Error);
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+/** Один запрос с повтором без необязательных полей, если сервер их не понял. */
+async function streamWithLeanRetry(opts: ChatOptions, format: StructuredFormat, signal: AbortSignal): Promise<ChatResult> {
+  const key = cacheKey(opts.profile);
+  const lean = leanServers.has(key);
+  try {
+    return await streamOnce(opts, format, signal, lean);
+  } catch (err) {
+    if (lean || !isOptionalFieldRejection(err)) throw err;
+    leanServers.add(key);
+    return streamOnce(opts, format, signal, true);
+  }
+}
+
 /**
- * Стриминговый запрос к /v1/chat/completions. В режиме auto пробует json_schema →
+ * Повтор при перегрузке сервиса (503 «high demand», 429, сбой сети): пауза растёт,
+ * Retry-After от сервера уважается. Запрос к модели побочных эффектов не имеет, повторять безопасно.
+ */
+async function streamWithTransientRetry(opts: ChatOptions, format: StructuredFormat, signal: AbortSignal): Promise<ChatResult> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await streamWithLeanRetry(opts, format, signal);
+    } catch (err) {
+      if (attempt >= TRANSIENT_ATTEMPTS || !isTransientError(err) || signal.aborted) throw err;
+      const wait = transientDelay(attempt, err instanceof HttpError ? err.retryAfterMs : undefined);
+      opts.onRetry?.({ attempt, waitMs: wait, error: describeError(err) });
+      await sleep(wait, signal);
+    }
+  }
+}
+
+/**
+ * Стриминговый запрос к /chat/completions. В режиме auto пробует json_schema →
  * json_object → без формата, если сервер отвергает response_format, и запоминает рабочий.
  */
 export async function chatStream(opts: ChatOptions): Promise<ChatResult> {
@@ -223,8 +335,8 @@ export async function chatStream(opts: ChatOptions): Promise<ChatResult> {
 
   for (const [i, format] of formats.entries()) {
     try {
-      const result = await streamOnce(opts, format, signal);
-      if (opts.schema && profile.structuredOutput === 'auto') workingFormat.set(`${profile.baseUrl}|${profile.model}`, format);
+      const result = await streamWithTransientRetry(opts, format, signal);
+      if (opts.schema && profile.structuredOutput === 'auto') workingFormat.set(cacheKey(profile), format);
       return result;
     } catch (err) {
       if (i < formats.length - 1 && isFormatRejection(err)) continue;

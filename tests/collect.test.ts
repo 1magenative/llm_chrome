@@ -629,6 +629,32 @@ describe('collectSnapshot: «Скрыть от модели»', () => {
     expect(snapshot.text).toBe('Как вам задача?');
     expect(snapshot.stats.userHidden).toBe(2);
   });
+
+  it('иконки без текста скрываются CSS-селектором — вместе со всем содержимым', () => {
+    const { snapshot } = collect(
+      `<aside data-rect="0 0 80 300">
+         <button class="theme-toggle" data-rect="10 10 60 60"><svg></svg></button>
+         <button class="like-button" data-rect="10 80 60 60"><span>12</span></button>
+       </aside>
+       <div class="support-chat" data-rect="900 700 80 80" style="cursor:pointer"><button data-rect="910 710 60 60">Чат</button><p data-rect="900 770 80 10">Напишите нам</p></div>
+       <button data-rect="300 300 200 40">Проверить</button>`,
+      { hideNames: ['css: button.theme-toggle', 'CSS: .like-button', 'css: .support-chat', 'css: ]]не селектор'] },
+    );
+    expect(snapshot.elements.map((e) => e.name)).toEqual(['Проверить']);
+    expect(snapshot.text).not.toContain('Напишите нам');
+    expect(snapshot.text).not.toContain('12');
+    expect(snapshot.stats.userHidden).toBe(3);
+  });
+
+  it('текстовое правило убирает и текст ссылки внутри абзаца, регистр не важен', () => {
+    const { snapshot } = collect(
+      `<p data-rect="0 0 600 20">Перейдите в <a href="/my" data-rect="100 0 80 20">Мои курсы</a> или читайте дальше</p>
+       <header data-rect="0 40 600 40"><button data-rect="0 40 120 40" aria-label="Мои курсы"><span>☰</span> Мои курсы</button><button data-rect="130 40 200 40">Подарок за друга</button></header>`,
+      { hideNames: ['мои КУРСЫ', 'Подарок за друга'] },
+    );
+    expect(snapshot.elements).toEqual([]);
+    expect(snapshot.text).toBe('Перейдите в или читайте дальше');
+  });
 });
 
 describe('collectSnapshot: сбор внутри iframe с другого сайта', () => {

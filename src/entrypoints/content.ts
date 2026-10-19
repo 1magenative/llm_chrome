@@ -1,16 +1,17 @@
 import { browser, defineContentScript } from '#imports';
 import type { ActionResult } from '@/lib/agent/types';
 import { findClickPoint, performAndSettle, readFieldValue, selectFieldContent, type DomAction } from '@/lib/dom/act';
-import { collectSnapshot, framesOf, topRect, type RegistryEntry, type TraceVerdict } from '@/lib/dom/collect';
+import { accessibleName, collectSnapshot, framesOf, topRect, type RegistryEntry, type TraceVerdict } from '@/lib/dom/collect';
 import { CursorOverlay } from '@/lib/dom/cursor';
-import { diagnose, type Diagnosis } from '@/lib/dom/diagnose';
+import { describeElement, diagnose, type Diagnosis } from '@/lib/dom/diagnose';
+import { suggestHideRule } from '@/lib/dom/hide-rules';
 import { browserGeometry } from '@/lib/dom/geometry';
 import { DebugOverlay } from '@/lib/dom/overlay';
 import { ElementPicker } from '@/lib/dom/picker';
 import { serializePage } from '@/lib/dom/serialize';
 import { waitForStable } from '@/lib/dom/stable';
 import type { FrameChildTag, RawFrameObservation } from '@/lib/frames';
-import { errorMessage, isContentRequest, type ContentRequest, type FrameGeometry, type FrameInfo, type Result } from '@/lib/messages';
+import { errorMessage, isContentRequest, type ContentRequest, type FrameGeometry, type FrameInfo, type HidePick, type Result } from '@/lib/messages';
 
 const INSTALLED = Symbol.for('llm-agent.content-installed');
 /** Сколько последних снимков помнить: агент действует по своему снимку, даже если панель сняла новый. */
@@ -177,6 +178,33 @@ export default defineContentScript({
       });
     };
 
+    /**
+     * Пользователь кликает элемент, который надо скрыть от модели. Правило строится для того
+     * элемента, который видит модель (кнопка, а не иконка внутри неё).
+     */
+    const pickHideRule = async (maxChars: number, hide: string[]): Promise<HidePick | null> => {
+      const el = await picker.pick((target) => () => topRect({ index: 0, element: target, target, frames: framesOf(target) }, geom));
+      if (!el) return null;
+      const trace = new Map<Element, TraceVerdict>();
+      collectSnapshot(document, geom, { ignore: isOwn, maxTextChars: maxChars, trace, hideNames: hide });
+      let target = el;
+      let alreadyHidden = false;
+      for (let n: Element | null = el; n; n = n.parentElement ?? (n.getRootNode() as Partial<ShadowRoot>).host ?? null) {
+        const v = trace.get(n);
+        if (v?.kind === 'accepted') {
+          target = n;
+          break;
+        }
+        if (v?.kind === 'skipped' && v.reason === 'user-hidden') {
+          target = n;
+          alreadyHidden = true;
+          break;
+        }
+      }
+      const suggestion = suggestHideRule(target, accessibleName(target, geom));
+      return { element: describeElement(target), rule: suggestion.rule, matches: suggestion.matches, alreadyHidden, url: location.href };
+    };
+
     const handle = async (msg: ContentRequest): Promise<Result<unknown>> => {
       switch (msg.type) {
         case 'content:ping':
@@ -220,6 +248,8 @@ export default defineContentScript({
           return { ok: true, value: null };
         case 'content:pick':
           return { ok: true, value: await pickAndDiagnose(msg.maxChars, msg.hide) };
+        case 'content:pick-rule':
+          return { ok: true, value: await pickHideRule(msg.maxChars, msg.hide) };
         case 'content:pick-cancel':
           picker.cancel();
           return { ok: true, value: null };

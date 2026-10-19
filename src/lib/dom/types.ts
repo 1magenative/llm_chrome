@@ -8,6 +8,22 @@ export interface Rect {
 /** Положение элемента относительно вьюпорта верхнего документа. */
 export type Zone = 'above' | 'visible' | 'below';
 
+/**
+ * Признаки элемента для оценки риска действия. Модели не показываются — только классификатору
+ * (lib/agent/risk.ts): решение «рискованно ли» принимает расширение, а не модель.
+ */
+export type ElementFlag =
+  /** Поле пароля или банковской карты. */
+  | 'secret'
+  /** Кнопка, отправляющая форму. */
+  | 'submit'
+  /** Форма элемента содержит поле пароля/карты. */
+  | 'form-secret'
+  /** Поле поиска: Enter в нём — не «отправка сообщения». */
+  | 'search'
+  /** Многострочное поле (textarea, contenteditable): Enter в нём обычно отправляет сообщение. */
+  | 'message';
+
 export interface ElementInfo {
   /** Номер, по которому модель ссылается на элемент (с 1, в порядке документа). */
   index: number;
@@ -33,6 +49,7 @@ export interface ElementInfo {
   rect: Rect;
   inFrame?: boolean;
   inShadow?: boolean;
+  flags?: ElementFlag[];
 }
 
 export interface ScrollInfo {

@@ -21,6 +21,8 @@ export interface AgentStep {
   reasoning: string;
   expected_outcome: string;
   actions: AgentAction[];
+  /** Модель считает шаг необратимым. Может только добавить подтверждение, снять — нет. */
+  risky?: boolean;
 }
 
 export const ACTION_NAMES: readonly ActionName[] = [
@@ -70,6 +72,7 @@ export function agentResponseSchema(maxActions: number): JsonSchema {
     properties: {
       reasoning: str(),
       expected_outcome: str(),
+      risky: { type: 'boolean' },
       actions: {
         type: 'array',
         minItems: 1,

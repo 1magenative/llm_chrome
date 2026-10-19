@@ -1,7 +1,7 @@
 import { browser } from '#imports';
 import type { ObservationHandle } from './agent/types';
 import { serializePage } from './dom/serialize';
-import type { Rect } from './dom/types';
+import type { ElementFlag, Rect } from './dom/types';
 import { buildFrameTree, mergeObservations, type FrameInfoReport, type FrameNode, type FrameTagReport, type RawFrameObservation } from './frames';
 import type { ContentRequest, ContentResponses, ObserveResult, Result } from './messages';
 
@@ -141,7 +141,13 @@ export async function observePage(tabId: number, url: string | undefined, opts: 
   );
 
   const owner: Record<number, number> = {};
-  for (const { node, obs } of parts) for (const e of obs.elements) owner[e.index] = node.frameId;
+  const flags: Record<number, ElementFlag[]> = {};
+  for (const { node, obs } of parts) {
+    for (const e of obs.elements) {
+      owner[e.index] = node.frameId;
+      if (e.flags?.length) flags[e.index] = e.flags;
+    }
+  }
 
   return {
     text: page.text,
@@ -160,7 +166,7 @@ export async function observePage(tabId: number, url: string | undefined, opts: 
       walkTruncated: snapshot.stats.walkTruncated,
       durationMs: Math.round(performance.now() - started),
     },
-    handle: { frames: parts.map((p) => ({ frameId: p.node.frameId, snapshotId: p.obs.snapshotId })), owner, nodes },
+    handle: { frames: parts.map((p) => ({ frameId: p.node.frameId, snapshotId: p.obs.snapshotId })), owner, nodes, flags },
   };
 }
 

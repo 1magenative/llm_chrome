@@ -1,9 +1,10 @@
 import { useState } from 'preact/hooks';
 import { browser } from '#imports';
 import type { Diagnosis } from '@/lib/dom/diagnose';
-import { errorMessage, sendToBackground, type ObserveResult } from '@/lib/messages';
+import { errorMessage, sendToBackground, type HidePick, type ObserveResult } from '@/lib/messages';
 import { activeTab, ensureContentScript, sendToContent } from '@/lib/perception';
-import { hiddenNamesFor, type SiteNote } from '@/lib/agent/site-notes';
+import { addHideRule, hiddenNamesFor, sitePatternFor, type SiteNote } from '@/lib/agent/site-notes';
+import { loadSettings, saveSettings } from '@/lib/settings';
 
 async function currentWindowId(): Promise<number> {
   const win = await browser.windows.getCurrent();
@@ -26,6 +27,9 @@ export function Perception({ defaultHighlight, maxChars, siteNotes }: Props) {
   const [copied, setCopied] = useState(false);
   const [picking, setPicking] = useState(false);
   const [diagnosis, setDiagnosis] = useState<Diagnosis | null>(null);
+  const [hiding, setHiding] = useState(false);
+  const [hidePick, setHidePick] = useState<(HidePick & { pattern: string }) | null>(null);
+  const [hideSaved, setHideSaved] = useState('');
 
   const observe = async (withHighlight = highlight) => {
     setBusy(true);
@@ -73,6 +77,38 @@ export function Perception({ defaultHighlight, maxChars, siteNotes }: Props) {
     }
   };
 
+  /** «Скрыть от модели»: кликнуть элемент → предложенное правило → в заметку для сайта. */
+  const pickToHide = async () => {
+    setError('');
+    setHideSaved('');
+    setHidePick(null);
+    try {
+      const tab = await activeTab(await currentWindowId());
+      await ensureContentScript(tab.id, tab.url);
+      if (hiding) {
+        await sendToContent(tab.id, { type: 'content:pick-cancel' });
+        return;
+      }
+      setHiding(true);
+      const hide = tab.url ? hiddenNamesFor(tab.url, siteNotes) : [];
+      const picked = await sendToContent(tab.id, { type: 'content:pick-rule', maxChars, hide });
+      if (picked) setHidePick({ ...picked, pattern: sitePatternFor(picked.url) });
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setHiding(false);
+    }
+  };
+
+  const saveHideRule = async () => {
+    if (!hidePick) return;
+    const settings = await loadSettings();
+    await saveSettings({ ...settings, siteNotes: addHideRule(settings.siteNotes, hidePick.pattern, hidePick.rule) });
+    setHideSaved(`Добавлено в заметку для ${hidePick.pattern}. Можно выбрать следующий элемент.`);
+    setHidePick(null);
+    if (result) void observe();
+  };
+
   const s = result?.stats;
 
   return (
@@ -89,6 +125,9 @@ export function Perception({ defaultHighlight, maxChars, siteNotes }: Props) {
         <button onClick={() => void pick()} title="Кликните элемент на странице — расширение объяснит, видит ли его модель">
           {picking ? 'Отменить выбор' : 'Почему не виден?'}
         </button>
+        <button onClick={() => void pickToHide()} title="Кликните элемент на странице — модель перестанет его видеть на этом сайте">
+          {hiding ? 'Отменить выбор' : 'Скрыть элемент…'}
+        </button>
         {result && (
           <button onClick={() => void copy()} title="Скопировать текст наблюдения">
             {copied ? 'Скопировано' : 'Копировать'}
@@ -98,7 +137,34 @@ export function Perception({ defaultHighlight, maxChars, siteNotes }: Props) {
 
       {error && <div class="err">{error}</div>}
 
-      {picking && <div class="muted">Кликните элемент на странице. Esc — отмена.</div>}
+      {(picking || hiding) && <div class="muted">Кликните элемент на странице. Esc — отмена.</div>}
+
+      {hideSaved && <div class="ok">{hideSaved}</div>}
+
+      {hidePick && (
+        <div class="card diagnosis warn-border">
+          <div class="mono">{hidePick.element}</div>
+          {hidePick.alreadyHidden && <div class="ok">Этот элемент уже скрыт от модели.</div>}
+          <label class="field">
+            <span>Правило «Скрыть от модели» (текст кнопки или css: селектор)</span>
+            <input class="mono" value={hidePick.rule} spellcheck={false} onInput={(e) => setHidePick({ ...hidePick, rule: e.currentTarget.value })} />
+          </label>
+          <div class={hidePick.matches > 1 ? 'warn' : 'muted'}>
+            Под правило попадает элементов на странице: {hidePick.matches}
+            {hidePick.matches > 1 ? ' — все они будут скрыты' : ''}
+          </div>
+          <label class="field">
+            <span>Для сайта</span>
+            <input class="mono" value={hidePick.pattern} spellcheck={false} onInput={(e) => setHidePick({ ...hidePick, pattern: e.currentTarget.value })} />
+          </label>
+          <div class="row">
+            <button class="primary" disabled={!hidePick.rule.trim() || !hidePick.pattern.trim()} onClick={() => void saveHideRule()}>
+              Скрыть
+            </button>
+            <button onClick={() => setHidePick(null)}>Отмена</button>
+          </div>
+        </div>
+      )}
 
       {diagnosis && (
         <div class={`card diagnosis ${diagnosis.ok ? 'ok-border' : 'warn-border'}`}>

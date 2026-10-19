@@ -1,3 +1,5 @@
+import type { SiteRiskMode } from './risk';
+
 /** Заметка пользователя о сайте: попадает в промпт, когда агент на подходящей странице. */
 export interface SiteNote {
   /** «practicum.yandex.ru» или «practicum.yandex.ru/learn» — домен (с поддоменами) и необязательный префикс пути. */
@@ -5,6 +7,10 @@ export interface SiteNote {
   notes: string;
   /** Тексты элементов, которые модель не должна видеть и нажимать — по одному на строку. */
   hide: string;
+  /** Рискованные действия на этом сайте: спрашивать / выполнять без подтверждения / запрещать. */
+  risk: SiteRiskMode;
+  /** Тексты кнопок, для которых подтверждение не нужно — по одному на строку. */
+  safe: string;
 }
 
 interface ParsedPattern {
@@ -38,13 +44,40 @@ export function noteMatches(url: string, pattern: string): boolean {
   return hostOk && (!p.path || u.pathname.toLowerCase().startsWith(p.path));
 }
 
-/** Тексты «скрыть от модели» для страницы (нижний регистр, без пустых). */
+/** Правила «скрыть от модели» для страницы (без пустых; текст или `css: селектор` — см. dom/hide-rules.ts). */
 export function hiddenNamesFor(url: string, notes: readonly SiteNote[]): string[] {
   return notes
     .filter((n) => noteMatches(url, n.pattern))
     .flatMap((n) => n.hide.split('\n'))
-    .map((s) => s.trim().toLowerCase())
+    .map((s) => s.trim())
     .filter(Boolean);
+}
+
+/** Шаблон заметки для страницы: домен без www. */
+export function sitePatternFor(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, '');
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Добавляет правило «Скрыть от модели» в заметку с этим шаблоном (создаёт её, если нет).
+ * Повтор не дублируется.
+ */
+export function addHideRule(notes: readonly SiteNote[], pattern: string, rule: string): SiteNote[] {
+  const r = rule.trim();
+  const p = pattern.trim();
+  if (!r || !p) return [...notes];
+  const i = notes.findIndex((n) => n.pattern.trim().toLowerCase() === p.toLowerCase());
+  if (i === -1) return [...notes, { pattern: p, notes: '', hide: r, risk: 'ask', safe: '' }];
+  const note = notes[i]!;
+  const lines = note.hide.split('\n').map((l) => l.trim()).filter(Boolean);
+  if (lines.includes(r)) return [...notes];
+  const copy = [...notes];
+  copy[i] = { ...note, hide: [...lines, r].join('\n') };
+  return copy;
 }
 
 /** Текст заметок для страницы; пустая строка — подходящих нет. */

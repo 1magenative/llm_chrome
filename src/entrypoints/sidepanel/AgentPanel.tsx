@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'preact/hooks';
 import { browser } from '#imports';
 import { TERMINAL_STATUSES, type RunState, type RunStatus } from '@/lib/agent/types';
-import { isUiEvent, sendToBackground } from '@/lib/messages';
+import { isUiEvent, sendToBackground, type RunInfo } from '@/lib/messages';
 import { saveSettings, type Settings } from '@/lib/settings';
+import { Queue } from './Queue';
 import { ActionLine, StepCard } from './StepCard';
 
 export const STATUS_LABELS: Record<RunStatus, string> = {
@@ -13,6 +14,7 @@ export const STATUS_LABELS: Record<RunStatus, string> = {
   done: 'готово',
   failed: 'ошибка',
   stopped: 'остановлен',
+  deferred: 'ждёт утра',
 };
 
 interface Live {
@@ -22,15 +24,16 @@ interface Live {
 }
 
 /** Текущее состояние запуска из background + живой поток токенов модели. */
-function useRun(): { run: RunState | null; live: Live } {
-  const [run, setRun] = useState<RunState | null>(null);
+function useRun(): { run: RunState | null; interrupted: boolean; live: Live } {
+  const [info, setInfo] = useState<RunInfo | null>(null);
   const [live, setLive] = useState<Live>({ phase: '', content: '', reasoningChars: 0 });
 
   useEffect(() => {
-    void sendToBackground({ type: 'bg:run-get' }).then((res) => res.ok && setRun(res.value));
+    void sendToBackground({ type: 'bg:run-get' }).then((res) => res.ok && setInfo(res.value));
     const listener = (msg: unknown) => {
       if (!isUiEvent(msg)) return;
-      if (msg.type === 'ui:run-state') return setRun(msg.state);
+      if (msg.type === 'ui:run-state') return setInfo(msg.info);
+      if (msg.type !== 'ui:step-progress') return;
       const e = msg.event;
       setLive((l) => {
         switch (e.phase) {
@@ -42,6 +45,8 @@ function useRun(): { run: RunState | null; live: Live } {
             return { ...l, content: l.content + e.content, reasoningChars: l.reasoningChars + e.reasoning.length };
           case 'parse-error':
             return { ...l, phase: `Неразборчивый ответ: ${e.error}` };
+          case 'service-retry':
+            return { ...l, phase: `Сервис недоступен (${e.error}). Жду ${Math.round(e.waitMs / 1000)} с и пробую снова — попытка ${e.attempt}.` };
         }
       });
     };
@@ -49,14 +54,27 @@ function useRun(): { run: RunState | null; live: Live } {
     return () => browser.runtime.onMessage.removeListener(listener);
   }, []);
 
-  return { run, live };
+  return { run: info?.state ?? null, interrupted: info?.interrupted ?? false, live };
+}
+
+/** Секунды до deadline, обновляются раз в секунду. */
+function useCountdown(deadline: number | undefined): number | null {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    if (!deadline) return;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [deadline]);
+  return deadline ? Math.max(0, Math.ceil((deadline - now) / 1000)) : null;
 }
 
 export function AgentPanel({ task, settings }: { task: string; settings: Settings }) {
-  const { run, live } = useRun();
+  const { run, interrupted, live } = useRun();
   const [error, setError] = useState('');
   const [answer, setAnswer] = useState('');
-  const active = run !== null && !TERMINAL_STATUSES.has(run.status);
+  const active = run !== null && !interrupted && !TERMINAL_STATUSES.has(run.status);
+  const secondsLeft = useCountdown(run?.status === 'awaiting_approval' ? run.pendingApproval?.deadline : undefined);
+  const setAgentFlag = (key: 'approveEachStep' | 'autonomous', value: boolean) => void saveSettings({ ...settings, agent: { ...settings.agent, [key]: value } });
 
   const call = async (p: ReturnType<typeof sendToBackground>) => {
     setError('');
@@ -79,8 +97,24 @@ export function AgentPanel({ task, settings }: { task: string; settings: Setting
 
   return (
     <>
+      {interrupted && run && (
+        <div class="card approval">
+          <b>Задача прервана перезапуском браузера или расширения</b>
+          <div class="muted runlog-task">{run.task}</div>
+          <p class="muted">
+            Выполнено шагов: {run.steps.length}. Агент продолжит с текущей страницы и проверит, что успело выполниться.
+          </p>
+          <div class="row">
+            <button class="primary" onClick={() => void call(sendToBackground({ type: 'bg:run-recover', command: 'resume' }))}>
+              Продолжить
+            </button>
+            <button onClick={() => void call(sendToBackground({ type: 'bg:run-recover', command: 'discard' }))}>Отменить</button>
+          </div>
+        </div>
+      )}
+
       <div class="row controls">
-        {!active && (
+        {!active && !interrupted && (
           <button class="primary" onClick={() => void start()} disabled={!task.trim()}>
             Старт
           </button>
@@ -99,30 +133,39 @@ export function AgentPanel({ task, settings }: { task: string; settings: Setting
         {active && <button onClick={() => control('stop')}>Стоп</button>}
       </div>
 
-      <label class="check">
-        <input
-          type="checkbox"
-          checked={settings.agent.approveEachStep}
-          disabled={active}
-          onChange={(e) => void saveSettings({ ...settings, agent: { ...settings.agent, approveEachStep: e.currentTarget.checked } })}
-        />
-        Подтверждать каждый шаг
-      </label>
+      <div class="row" style={{ gap: '16px' }}>
+        <label class="check" title="Рискованные действия ждут подтверждения N секунд со звуком, затем уходят в очередь на утро; ask_user — модель решает сама">
+          <input type="checkbox" checked={settings.agent.autonomous} disabled={active} onChange={(e) => setAgentFlag('autonomous', e.currentTarget.checked)} />
+          Автономный режим
+        </label>
+        <label class="check" title="Отладка: подтверждать и безопасные шаги. В автономном режиме не действует">
+          <input
+            type="checkbox"
+            checked={settings.agent.approveEachStep}
+            disabled={active || settings.agent.autonomous}
+            onChange={(e) => setAgentFlag('approveEachStep', e.currentTarget.checked)}
+          />
+          Подтверждать каждый шаг
+        </label>
+      </div>
 
       {error && <div class="err">{error}</div>}
 
-      {run && (
+      {run && !interrupted && (
         <div class={`card run-status status-${run.status}`}>
           <div>
             <b>{STATUS_LABELS[run.status]}</b> · шаг {run.steps.length} из {run.maxSteps} · {run.model}
+            {run.autonomous ? ' · автономно' : ''}
+            {run.restarts ? ` · перезапусков: ${run.restarts}` : ''}
           </div>
           <div class="muted runlog-task">{run.task}</div>
         </div>
       )}
 
-      {run?.status === 'awaiting_approval' && run.pendingApproval && (
-        <div class="card approval">
-          <b>Агент хочет сделать:</b>
+      {!interrupted && run?.status === 'awaiting_approval' && run.pendingApproval && (
+        <div class={`card approval${run.pendingApproval.actions.some((a) => a.risk) ? ' risky' : ''}`}>
+          <b>{run.pendingApproval.actions.some((a) => a.risk) ? 'Рискованное действие — нужно ваше подтверждение:' : 'Агент хочет сделать:'}</b>
+          {secondsLeft !== null && <p class="warn">Без ответа через {secondsLeft} с действие уйдёт в очередь на утро, агент продолжит остальное.</p>}
           {run.pendingApproval.reasoning && <p>{run.pendingApproval.reasoning}</p>}
           <ol class="actions">
             {run.pendingApproval.actions.map((a, i) => (
@@ -138,7 +181,7 @@ export function AgentPanel({ task, settings }: { task: string; settings: Setting
         </div>
       )}
 
-      {run?.status === 'asking_user' && (
+      {!interrupted && run?.status === 'asking_user' && (
         <div class="card approval">
           <b>Агент спрашивает:</b>
           <p>{run.question}</p>
@@ -167,6 +210,12 @@ export function AgentPanel({ task, settings }: { task: string; settings: Setting
           <p class="pre">{run.result || '(пусто)'}</p>
         </div>
       )}
+      {run?.status === 'deferred' && (
+        <div class="card result warn-border">
+          <b>Ждёт утра</b>
+          <p class="pre">{run.result}</p>
+        </div>
+      )}
       {(run?.status === 'failed' || run?.status === 'stopped') && run.error && <div class="card err warn-border">{run.error}</div>}
 
       {run && run.extracted.length > 0 && (
@@ -181,6 +230,8 @@ export function AgentPanel({ task, settings }: { task: string; settings: Setting
           </ol>
         </details>
       )}
+
+      <Queue busy={active || interrupted} />
 
       <section class="feed">
         {steps.length === 0 && <div class="empty muted card">Лента шагов появится, когда агент начнёт работать.</div>}

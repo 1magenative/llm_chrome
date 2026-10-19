@@ -6,13 +6,30 @@ import {
   saveSettings,
   type AgentSettings,
   type LlmProfile,
+  type SafetySettings,
   type ProfileId,
   type Settings,
   type StructuredOutputMode,
 } from '@/lib/settings';
 import { checkConnection, probeGeneration, type ConnectionReport, type ProbeResult } from '@/lib/llm/connection';
-import { normalizeBaseUrl } from '@/lib/llm/url';
+import { DEFAULT_RISK_RULES, type RiskRules, type SiteRiskMode } from '@/lib/agent/risk';
+import { PROVIDERS, PROVIDER_IDS, providerInfo, type ProviderId } from '@/lib/llm/providers';
+import { sendToBackground } from '@/lib/messages';
+import { isLocalHost, normalizeBaseUrl } from '@/lib/llm/url';
 import { CheckField, NumberField, TextField } from '@/ui/fields';
+
+const RISK_MODE_LABELS: Record<SiteRiskMode, string> = {
+  ask: 'спрашивать подтверждение',
+  allow: 'выполнять без подтверждения',
+  block: 'запрещать',
+};
+
+const RULE_FIELDS: { key: keyof RiskRules; label: string }[] = [
+  { key: 'payment', label: 'Оплата — тексты кнопок' },
+  { key: 'delete', label: 'Удаление — тексты кнопок' },
+  { key: 'send', label: 'Отправка — тексты кнопок' },
+  { key: 'paymentUrls', label: 'Страницы оплаты — части адреса' },
+];
 
 const STRUCTURED_LABELS: Record<StructuredOutputMode, string> = {
   auto: 'Авто (json_schema → парсинг текста)',
@@ -41,8 +58,32 @@ export function App() {
   };
   const setProfile = <K extends keyof LlmProfile>(key: K, value: LlmProfile[K]) =>
     update((s) => ({ ...s, profiles: { ...s.profiles, [tab]: { ...s.profiles[tab], [key]: value } } }));
+
+  /**
+   * Смена провайдера подставляет его адрес и модель, но только если поле осталось
+   * значением прежнего провайдера — набранное руками не затирается.
+   */
+  const setProvider = (id: ProviderId) =>
+    update((s) => {
+      const p = s.profiles[tab];
+      const from = providerInfo(p.provider);
+      const to = PROVIDERS[id];
+      const swap = (value: string, a: string, b: string) => (value.trim() === '' || value.trim() === a ? b : value);
+      return {
+        ...s,
+        profiles: {
+          ...s.profiles,
+          [tab]: { ...p, provider: id, baseUrl: swap(p.baseUrl, from.baseUrl, to.baseUrl), model: swap(p.model, from.model, to.model) },
+        },
+      };
+    });
   const setAgent = <K extends keyof AgentSettings>(key: K, value: AgentSettings[K]) =>
     update((s) => ({ ...s, agent: { ...s.agent, [key]: value } }));
+  const setSafety = <K extends keyof SafetySettings>(key: K, value: SafetySettings[K]) =>
+    update((s) => ({ ...s, safety: { ...s.safety, [key]: value } }));
+  const setRule = (key: keyof RiskRules, value: string) => setSafety('rules', { ...settings.safety.rules, [key]: value });
+  const setNote = <K extends keyof Settings['siteNotes'][number]>(i: number, key: K, value: Settings['siteNotes'][number][K]) =>
+    update((s) => ({ ...s, siteNotes: s.siteNotes.map((n, j) => (j === i ? { ...n, [key]: value } : n)) }));
 
   const extraBodyError = (Object.keys(settings.profiles) as ProfileId[])
     .map((id) => {
@@ -63,6 +104,7 @@ export function App() {
       profiles: {
         fast: { ...p.fast, baseUrl: normalizeBaseUrl(p.fast.baseUrl) ?? p.fast.baseUrl },
         slow: { ...p.slow, baseUrl: normalizeBaseUrl(p.slow.baseUrl) ?? p.slow.baseUrl },
+        cloud: { ...p.cloud, baseUrl: normalizeBaseUrl(p.cloud.baseUrl) ?? p.cloud.baseUrl },
       },
     };
     setSettings(await saveSettings(fixed));
@@ -70,6 +112,9 @@ export function App() {
   };
 
   const profile = settings.profiles[tab];
+  const provider = providerInfo(profile.provider);
+  const normalized = normalizeBaseUrl(profile.baseUrl);
+  const remote = provider.cloud || (normalized !== null && !isLocalHost(normalized));
 
   return (
     <main>
@@ -87,21 +132,36 @@ export function App() {
         </div>
 
         <div class="grid">
+          <label class="field">
+            <span>Провайдер</span>
+            <select value={profile.provider} onChange={(e) => setProvider(e.currentTarget.value as ProviderId)}>
+              {PROVIDER_IDS.map((id) => (
+                <option key={id} value={id}>
+                  {PROVIDERS[id].label}
+                </option>
+              ))}
+            </select>
+          </label>
           <TextField
-            label="Адрес сервера"
+            label="Адрес сервера (можно вместе с /v1)"
             type="url"
             value={profile.baseUrl}
-            placeholder="http://192.168.1.10:11434"
+            placeholder={provider.baseUrl}
             onChange={(v) => setProfile('baseUrl', v)}
           />
           <TextField
             label="Модель"
             value={profile.model}
             list="models"
-            placeholder="qwen3:14b"
+            placeholder={provider.model}
             onChange={(v) => setProfile('model', v)}
           />
-          <TextField label="API-ключ (необязательно)" type="password" value={profile.apiKey} onChange={(v) => setProfile('apiKey', v)} />
+          <TextField
+            label={provider.keyRequired ? 'API-ключ (обязателен)' : 'API-ключ (необязательно)'}
+            type="password"
+            value={profile.apiKey}
+            onChange={(v) => setProfile('apiKey', v)}
+          />
           <TextField label="Название профиля" value={profile.label} onChange={(v) => setProfile('label', v)} />
           <NumberField label="Температура" value={profile.temperature} min={0} max={2} step={0.05} onChange={(v) => setProfile('temperature', v)} />
           <NumberField label="Бюджет контекста, токенов" value={profile.contextTokens} min={1024} step={1024} onChange={(v) => setProfile('contextTokens', v)} />
@@ -122,8 +182,26 @@ export function App() {
           </label>
         </div>
 
+        {remote && (
+          <div class="warn">
+            Внешний сервер: текст каждой страницы, по которой ходит агент, уходит на{' '}
+            {normalizeBaseUrl(profile.baseUrl)?.replace(/^https?:\/\//, '') ?? provider.baseUrl}. Для личных кабинетов лучше держать модель в своей сети.
+            {provider.hint ? ` ${provider.hint}` : ''}
+            {provider.keyUrl && (
+              <>
+                {' '}
+                <a href={provider.keyUrl} target="_blank" rel="noreferrer">
+                  Получить ключ
+                </a>
+              </>
+            )}
+          </div>
+        )}
+
+        {!remote && provider.hint && <p class="muted" style={{ margin: 0 }}>{provider.hint}</p>}
+
         <label class="field">
-          <span>Доп. параметры запроса (JSON-объект, вмешивается в тело /v1/chat/completions)</span>
+          <span>Доп. параметры запроса (JSON-объект, вмешивается в тело /chat/completions)</span>
           <textarea
             class="mono"
             rows={2}
@@ -137,7 +215,11 @@ export function App() {
         <div class="row" style={{ gap: '16px' }}>
           <CheckField
             label="Рассуждения (thinking)"
-            hint="Выключено: chat_template_kwargs.enable_thinking=false и think=false. gpt-oss рассуждения не отключает."
+            hint={
+              provider.id === 'google'
+                ? 'Выключено: reasoning_effort=none. У Gemini Pro и 3.x рассуждения не отключаются — оставьте включённым.'
+                : 'Выключено: chat_template_kwargs.enable_thinking=false и think=false. gpt-oss рассуждения не отключает.'
+            }
             checked={profile.thinking}
             onChange={(v) => setProfile('thinking', v)}
           />
@@ -165,6 +247,13 @@ export function App() {
           <NumberField label="Таймаут шага (без LLM), сек" value={settings.agent.stepTimeoutSec} min={5} onChange={(v) => setAgent('stepTimeoutSec', v)} />
           <NumberField label="Порог зацикливания (повторов)" value={settings.agent.loopThreshold} min={2} onChange={(v) => setAgent('loopThreshold', v)} />
           <NumberField
+            label="Застрял — прокрутить вниз после шагов без пользы (0 — выкл)"
+            value={settings.agent.autoScrollAfter}
+            min={0}
+            max={20}
+            onChange={(v) => setAgent('autoScrollAfter', v)}
+          />
+          <NumberField
             label="Лимит наблюдения, символов"
             value={settings.agent.maxObservationChars}
             min={1000}
@@ -174,14 +263,14 @@ export function App() {
         </div>
         <div class="row" style={{ gap: '16px' }}>
           <CheckField
-            label="Подтверждать каждый шаг"
-            hint="Перед кликами, вводом и переходами агент ждёт «Выполнить» в панели"
+            label="Подтверждать каждый шаг (отладка)"
+            hint="Ждать «Выполнить» и перед безопасными кликами, вводом и переходами. Рискованные действия подтверждаются всегда. В автономном режиме не действует"
             checked={settings.agent.approveEachStep}
             onChange={(v) => setAgent('approveEachStep', v)}
           />
           <CheckField
             label="Автономный режим"
-            hint="Рискованные действия не выполняются, а откладываются в очередь на утро"
+            hint="Ночью: рискованное ждёт подтверждения (со звуком), затем уходит в очередь на утро; на ask_user модель решает сама; после перезапуска браузера задача продолжается сама"
             checked={settings.agent.autonomous}
             onChange={(v) => setAgent('autonomous', v)}
           />
@@ -189,9 +278,39 @@ export function App() {
           <CheckField label="Визуальный курсор" checked={settings.agent.showCursor} onChange={(v) => setAgent('showCursor', v)} />
           <CheckField label="Debug-подсветка элементов" checked={settings.agent.debugOverlay} onChange={(v) => setAgent('debugOverlay', v)} />
         </div>
+      </section>
+
+      <section class="card">
+        <h2>Безопасность</h2>
         <p class="muted" style={{ margin: 0 }}>
-          Эти параметры начнут работать на этапах 2–6.
+          Рискованным действие считает расширение, а не модель: по тексту кнопки, адресу страницы и типу поля (пароль, карта, Enter в поле сообщения).
+          Слово совпадает по началу слова: «оплат» поймает «Оплатить» и «Перейти к оплате». По одному на строку.
         </p>
+        <div class="grid">
+          {RULE_FIELDS.map(({ key, label }) => (
+            <label key={key} class="field">
+              <span>{label}</span>
+              <textarea rows={4} spellcheck={false} value={settings.safety.rules[key]} onInput={(e) => setRule(key, e.currentTarget.value)} />
+            </label>
+          ))}
+        </div>
+        <div class="row" style={{ gap: '16px', alignItems: 'flex-end' }}>
+          <NumberField
+            label="Автономно: ждать подтверждения, сек (0 — сразу в очередь)"
+            value={settings.safety.approvalWindowSec}
+            min={0}
+            max={3600}
+            onChange={(v) => setSafety('approvalWindowSec', v)}
+          />
+          <CheckField
+            label="Звуковой сигнал"
+            hint="Когда в автономном режиме агент упирается в рискованное действие. Системное уведомление показывается всегда"
+            checked={settings.safety.sound}
+            onChange={(v) => setSafety('sound', v)}
+          />
+          <AlertTester />
+          <button onClick={() => setSafety('rules', DEFAULT_RISK_RULES)}>Словари по умолчанию</button>
+        </div>
       </section>
 
       <section class="card">
@@ -225,21 +344,40 @@ export function App() {
               }}
             />
             <label class="field">
-              <span>Скрыть от модели — тексты кнопок, по одному на строку (модель их не увидит и не нажмёт)</span>
+              <span>
+                Скрыть от модели — по одному на строку: текст кнопки или <span class="mono">css: селектор</span> для иконок. Модель не увидит ни элемент, ни его текст. Проще всего
+                добавлять кнопкой «Скрыть элемент…» в панели.
+              </span>
               <textarea
                 rows={2}
                 value={note.hide}
-                placeholder="Оценить"
+                placeholder={'Оценить\ncss: button[aria-label="Избранное"]'}
                 onInput={(e) => {
                   const hide = e.currentTarget.value;
                   update((s) => ({ ...s, siteNotes: s.siteNotes.map((n, j) => (j === i ? { ...n, hide } : n)) }));
                 }}
               />
             </label>
+            <div class="grid">
+              <label class="field">
+                <span>Рискованные действия на этом сайте</span>
+                <select value={note.risk} onChange={(e) => setNote(i, 'risk', e.currentTarget.value as SiteRiskMode)}>
+                  {(Object.keys(RISK_MODE_LABELS) as SiteRiskMode[]).map((m) => (
+                    <option key={m} value={m}>
+                      {RISK_MODE_LABELS[m]}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label class="field">
+                <span>Не спрашивать подтверждения для — тексты кнопок, по одному на строку (пароли всё равно спрашиваются)</span>
+                <textarea rows={2} value={note.safe} placeholder="Отправить ответ" onInput={(e) => setNote(i, 'safe', e.currentTarget.value)} />
+              </label>
+            </div>
           </div>
         ))}
         <div class="row">
-          <button onClick={() => update((s) => ({ ...s, siteNotes: [...s.siteNotes, { pattern: '', notes: '', hide: '' }] }))}>Добавить сайт</button>
+          <button onClick={() => update((s) => ({ ...s, siteNotes: [...s.siteNotes, { pattern: '', notes: '', hide: '', risk: 'ask', safe: '' }] }))}>Добавить сайт</button>
         </div>
       </section>
 
@@ -278,6 +416,24 @@ export function App() {
         </span>
       </div>
     </main>
+  );
+}
+
+/** Проверка звука и уведомления — сохранённые настройки (звук вкл/выкл) берутся из background. */
+function AlertTester() {
+  const [state, setState] = useState<'idle' | 'busy' | string>('idle');
+  const onClick = async () => {
+    setState('busy');
+    const res = await sendToBackground({ type: 'bg:alert-test' });
+    setState(res.ok ? 'idle' : res.error);
+  };
+  return (
+    <>
+      <button onClick={() => void onClick()} disabled={state === 'busy'}>
+        Проверить сигнал
+      </button>
+      {state !== 'idle' && state !== 'busy' && <span class="err">{state}</span>}
+    </>
   );
 }
 
@@ -334,7 +490,7 @@ function ConnectionTester({ profile }: { profile: LlmProfile }) {
         <div>
           {report.ok ? (
             <div class="ok">
-              Соединение есть: {report.baseUrl}, {report.latencyMs} мс, моделей: {report.models.length}
+              Соединение есть: {report.endpoint ?? report.baseUrl}, {report.latencyMs} мс, моделей: {report.models.length}
             </div>
           ) : (
             <div class="err">{report.error}</div>

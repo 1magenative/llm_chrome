@@ -1,9 +1,9 @@
 import 'fake-indexeddb/auto';
 import { afterEach, describe, expect, it } from 'vitest';
-import { exportRun, getStepDetail, listRuns, pruneRuns, resetLogDb, saveRun, saveStep } from '@/lib/log/db';
+import { addDeferred, exportRun, getDeferred, getStepDetail, listDeferred, listRuns, loadRun, pruneDeferred, pruneRuns, resetLogDb, saveRun, saveStep, setDeferredStatus } from '@/lib/log/db';
 import { postLog } from '@/lib/log/remote';
 import { normalizeNavigateUrl } from '@/lib/tab-actions';
-import type { RunState, StepRecord } from '@/lib/agent/types';
+import type { DeferredItem, RunState, StepRecord } from '@/lib/agent/types';
 
 const run = (id: string, startedAt: number, patch: Partial<RunState> = {}): RunState => ({
   id,
@@ -94,5 +94,47 @@ describe('normalizeNavigateUrl', () => {
   });
   it.each(['', 'javascript:alert(1)', 'file:///etc/passwd', 'chrome://settings', 'data:text/html,hi'])('отклоняет %j', (input) => {
     expect(normalizeNavigateUrl(input)).toBeNull();
+  });
+});
+
+describe('этап 6: загрузка запуска и очередь', () => {
+  const item = (id: string, createdAt: number, status: DeferredItem['status'] = 'pending'): DeferredItem => ({
+    id,
+    runId: 'a',
+    task: 'Купить слона',
+    createdAt,
+    step: 3,
+    url: 'https://shop.example/checkout',
+    title: 'Оплата',
+    actions: [{ action: { action: 'click', index: 7 }, target: 'button "Оплатить"', risk: [{ kind: 'payment', why: '«Оплатить»' }] }],
+    reasoning: 'r',
+    expectedOutcome: 'e',
+    extracted: ['цена 100'],
+    status,
+  });
+
+  it('loadRun возвращает запуск со всеми шагами по порядку', async () => {
+    await saveRun(run('a', 100, { steps: [step(1), step(2)], inFlight: { step: 2, action: 0 } }));
+    await saveStep('a', step(2));
+    await saveStep('a', step(1));
+    const r = await loadRun('a');
+    expect(r?.steps.map((s) => s.n)).toEqual([1, 2]);
+    expect(r?.inFlight).toEqual({ step: 2, action: 0 });
+    expect(r).not.toHaveProperty('stepCount');
+    expect(r?.steps[0]).not.toHaveProperty('runId');
+    expect(await loadRun('нет')).toBeNull();
+  });
+
+  it('очередь: ждущие сверху, смена статуса, чистка старых разобранных', async () => {
+    await addDeferred(item('old-done', 1, 'dismissed'));
+    await addDeferred(item('p1', 10));
+    await addDeferred(item('p2', 20));
+    await addDeferred(item('r1', 30, 'resumed'));
+    expect((await listDeferred()).map((i) => i.id)).toEqual(['p2', 'p1', 'r1', 'old-done']);
+    await setDeferredStatus('p2', 'dismissed');
+    expect((await getDeferred('p2'))?.status).toBe('dismissed');
+    expect(await getDeferred('нет')).toBeNull();
+    expect(await pruneDeferred(10 + 14 * 24 * 3600 * 1000)).toBe(1);
+    expect((await listDeferred()).map((i) => i.id)).toEqual(['p1', 'r1', 'p2']);
   });
 });

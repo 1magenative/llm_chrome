@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { AgentAction } from '@/lib/agent/actions';
-import { AgentRunner, type RunConfig, type RunDeps } from '@/lib/agent/runner';
-import type { ActionResult, RunState } from '@/lib/agent/types';
-import type { ChatResult } from '@/lib/llm/client';
+import { AgentRunner, MAX_DEFER_STREAK, MAX_SERVICE_ERRORS, type RunConfig, type RunDeps } from '@/lib/agent/runner';
+import { DEFAULT_RISK_RULES } from '@/lib/agent/risk';
+import type { ActionResult, DeferredItem, RunState } from '@/lib/agent/types';
+import type { ElementFlag } from '@/lib/dom/types';
+import { HttpError, type ChatResult } from '@/lib/llm/client';
 
 const cfg: RunConfig = {
   task: 'Найди цену',
@@ -18,6 +20,10 @@ const cfg: RunConfig = {
   profileLabel: 'Быстрый',
   model: 'qwen3',
   siteNotes: [],
+  autonomous: false,
+  riskRules: DEFAULT_RISK_RULES,
+  approvalWindowSec: 0,
+  autoScrollAfter: 0,
 };
 
 const reply = (actions: unknown[], reasoning = 'r'): ChatResult => ({
@@ -33,15 +39,33 @@ interface Harness {
   executed: AgentAction[];
   states: RunState[];
   chats: number;
+  deferred: DeferredItem[];
+  alerts: string[];
+  /** Что лежало в чекпоинте перед каждым действием. */
+  checkpoints: RunState[];
 }
 
-function harness(replies: (ChatResult | Error)[], opts: { pages?: string[]; exec?: (a: AgentAction) => ActionResult } = {}): Harness {
-  const h: Harness = { executed: [], states: [], chats: 0, deps: undefined as unknown as RunDeps };
+interface HarnessOpts {
+  pages?: string[];
+  exec?: (a: AgentAction) => ActionResult;
+  url?: string;
+  flags?: Record<number, ElementFlag[]>;
+  /** sleep, который никогда не кончается, — окно подтверждения не истекает само. */
+  slowSleep?: boolean;
+}
+
+function harness(replies: (ChatResult | Error)[], opts: HarnessOpts = {}): Harness {
+  const h: Harness = { executed: [], states: [], chats: 0, deferred: [], alerts: [], checkpoints: [], deps: undefined as unknown as RunDeps };
   let page = 0;
   h.deps = {
     observe: vi.fn(async () => {
-      const text = opts.pages?.[Math.min(page++, opts.pages.length - 1)] ?? `[1] button "Купить"\n[2] input "Поиск"\npage ${page}`;
-      return { observation: text, tabs: [], handle: { frames: [{ frameId: 0, snapshotId: page }], owner: {}, nodes: [] }, url: 'https://shop.example/' };
+      const text = opts.pages?.[Math.min(page++, opts.pages.length - 1)] ?? `[1] button "В корзину"\n[2] input "Поиск"\npage ${page}`;
+      return {
+        observation: text,
+        tabs: [],
+        handle: { frames: [{ frameId: 0, snapshotId: page }], owner: {}, nodes: [], flags: opts.flags },
+        url: opts.url ?? 'https://shop.example/',
+      };
     }),
     chat: vi.fn(async () => {
       h.chats++;
@@ -58,8 +82,15 @@ function harness(replies: (ChatResult | Error)[], opts: { pages?: string[]; exec
     onProgress: () => {},
     persistRun: vi.fn(async () => {}),
     persistStep: vi.fn(async () => {}),
+    checkpoint: async (s) => {
+      h.checkpoints.push(structuredClone(s));
+    },
+    defer: async (item) => {
+      h.deferred.push(item);
+    },
+    alert: (m) => h.alerts.push(m),
     now: () => 1000,
-    sleep: async () => {},
+    sleep: opts.slowSleep ? () => new Promise(() => {}) : async () => {},
     newId: () => 'run-1',
   };
   return h;
@@ -87,7 +118,7 @@ describe('AgentRunner', () => {
 
   it('заметки для сайта попадают в промпт по URL страницы', async () => {
     const h = harness([reply([{ action: 'done', result: 'ok' }])]);
-    await new AgentRunner({ ...cfg, siteNotes: [{ pattern: 'shop.example', notes: '«Купить» = положить в корзину', hide: '' }] }, h.deps).run();
+    await new AgentRunner({ ...cfg, siteNotes: [{ pattern: 'shop.example', notes: '«Купить» = положить в корзину', hide: '', risk: 'ask', safe: '' }] }, h.deps).run();
     const prompt = vi.mocked(h.deps.chat).mock.calls[0]![0].at(-1)!.content;
     expect(prompt).toContain('«Купить» = положить в корзину\n\nReply with the JSON object');
     const detail = vi.mocked(h.deps.persistStep).mock.calls[0]![2];
@@ -99,7 +130,7 @@ describe('AgentRunner', () => {
     await new AgentRunner(cfg, h.deps).run();
     const secondPrompt = vi.mocked(h.deps.chat).mock.calls[1]![0].at(-1)!.content;
     expect(secondPrompt).toContain('HISTORY:\nStep 1 (https://shop.example/):');
-    expect(secondPrompt).toContain('click [1] (button "Купить") → ok');
+    expect(secondPrompt).toContain('click [1] (button "В корзину") → ok');
   });
 
   it('ошибка действия обрывает цепочку, остальное помечается пропущенным', async () => {
@@ -157,6 +188,24 @@ describe('AgentRunner', () => {
     expect(state.status).toBe('failed');
     expect(state.error).toMatch(/3 раза подряд/);
     expect(state.steps.every((s) => s.error)).toBe(true);
+  });
+
+  it('перегрузка сервиса терпится дольше, чем негодные ответы модели', async () => {
+    const down = () => new HttpError(503, 'This model is currently experiencing high demand.', 'u');
+    // Столько же отказов, сколько убивает запуск при ошибках модели, — но запуск продолжается.
+    const h = harness([down(), down(), down(), reply([{ action: 'done', result: 'ok' }])]);
+    const state = await new AgentRunner(cfg, h.deps).run();
+    expect(state.status).toBe('done');
+    expect(state.steps.filter((s) => s.error).length).toBe(3);
+
+    // Пока сервис не поднимется — ждём с растущей паузой и только потом сдаёмся.
+    const h2 = harness(Array.from({ length: MAX_SERVICE_ERRORS + 2 }, down));
+    const waits: number[] = [];
+    h2.deps.sleep = async (ms) => void waits.push(ms);
+    const dead = await new AgentRunner(cfg, h2.deps).run();
+    expect(dead.status).toBe('failed');
+    expect(dead.error).toMatch(/Сервис модели недоступен 8 раз подряд/);
+    expect(waits).toEqual([5000, 15_000, 45_000, 120_000, 120_000, 120_000, 120_000]);
   });
 
   it('ошибка модели не фатальна, если следующий шаг удался', async () => {
@@ -229,5 +278,269 @@ describe('AgentRunner', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  describe('этап 6: рискованные действия', () => {
+    const payPage = ['[1] button "Оплатить 500 ₽"\n[2] input "Комментарий"'];
+    const payAndDone = () => [
+      reply([{ action: 'type', index: 2, text: 'Спасибо', submit: false }, { action: 'click', index: 1 }]),
+      reply([{ action: 'done', result: 'Готово' }]),
+    ];
+
+    it('обычный режим: рискованный шаг ждёт одобрения, даже если пошаговый режим выключен', async () => {
+      const h = harness(payAndDone(), { pages: payPage });
+      const runner = new AgentRunner(cfg, h.deps);
+      const done = runner.run();
+      await until(runner, 'awaiting_approval');
+      const pending = runner.state.pendingApproval!;
+      expect(pending.deadline).toBeUndefined();
+      expect(pending.actions[0]!.risk).toBeUndefined();
+      expect(pending.actions[1]!.risk?.[0]?.kind).toBe('payment');
+      expect(h.executed).toHaveLength(0);
+      runner.approve(true);
+      const state = await done;
+      expect(state.status).toBe('done');
+      expect(h.executed).toHaveLength(2);
+      expect(h.deferred).toHaveLength(0);
+    });
+
+    it('обычный режим: безопасные шаги идут без остановок', async () => {
+      const h = harness([reply([{ action: 'click', index: 1 }]), reply([{ action: 'done', result: 'ok' }])]);
+      const state = await new AgentRunner(cfg, h.deps).run();
+      expect(state.status).toBe('done');
+      expect(h.states.some((s) => s.status === 'awaiting_approval')).toBe(false);
+    });
+
+    it('флаг risky от модели тоже требует одобрения', async () => {
+      const step = { reasoning: 'r', expected_outcome: 'e', risky: true, actions: [{ action: 'click', index: 1 }] };
+      const h = harness([{ ...reply([]), content: JSON.stringify(step) }, reply([{ action: 'done', result: 'ok' }])]);
+      const runner = new AgentRunner(cfg, h.deps);
+      const done = runner.run();
+      await until(runner, 'awaiting_approval');
+      expect(runner.state.pendingApproval!.actions[0]!.risk?.[0]?.kind).toBe('model');
+      runner.approve(false);
+      expect((await done).steps[0]!.actions[0]!.skipped).toBe('rejected by the user');
+    });
+
+    it('автономный режим: сигнал, безопасная часть цепочки выполняется, рискованное — в очередь', async () => {
+      const h = harness(payAndDone(), { pages: payPage });
+      const state = await new AgentRunner({ ...cfg, autonomous: true }, h.deps).run();
+      expect(h.alerts).toHaveLength(1);
+      expect(h.alerts[0]).toContain('Оплатить');
+      expect(h.executed).toEqual([{ action: 'type', index: 2, text: 'Спасибо', submit: false }]);
+      expect(h.deferred).toHaveLength(1);
+      const item = h.deferred[0]!;
+      expect(item).toMatchObject({ runId: 'run-1', task: cfg.task, step: 1, url: 'https://shop.example/', status: 'pending' });
+      expect(item.actions.map((a) => a.action)).toEqual([{ action: 'click', index: 1 }]);
+      expect(state.steps[0]!.actions[1]!.skipped).toMatch(/postponed/);
+      expect(vi.mocked(h.deps.chat).mock.calls[1]![0].at(-1)!.content).toContain('note: POSTPONED: click [1]');
+      expect(state.status).toBe('done');
+      expect(state.result).toBe('Готово\n\n⏸ Ждут вашего подтверждения в очереди: 1.');
+    });
+
+    it('автономный режим: одно и то же не откладывается дважды, а упорство завершает запуск', async () => {
+      const pay = () => reply([{ action: 'click', index: 1 }]);
+      const h = harness(Array.from({ length: 6 }, pay), { pages: payPage });
+      const state = await new AgentRunner({ ...cfg, autonomous: true, loopThreshold: 10 }, h.deps).run();
+      expect(h.deferred).toHaveLength(1);
+      expect(h.alerts).toHaveLength(1);
+      expect(state.status).toBe('deferred');
+      expect(state.steps).toHaveLength(MAX_DEFER_STREAK);
+      expect(state.steps[1]!.actions[0]!.skipped).toMatch(/already postponed/);
+      expect(state.result).toMatch(/Ждут подтверждения в очереди: 1/);
+    });
+
+    it('автономный режим: если человек успел нажать «Выполнить» за окно ожидания — выполняется', async () => {
+      const h = harness(payAndDone(), { pages: payPage, slowSleep: true });
+      const runner = new AgentRunner({ ...cfg, autonomous: true, approvalWindowSec: 120 }, h.deps);
+      const done = runner.run();
+      await until(runner, 'awaiting_approval');
+      expect(runner.state.pendingApproval!.deadline).toBe(1000 + 120_000);
+      runner.approve(true);
+      const state = await done;
+      expect(h.executed).toHaveLength(2);
+      expect(h.deferred).toHaveLength(0);
+      expect(state.result).toBe('Готово');
+    });
+
+    it('автономный режим: окно ожидания истекло — в очередь', async () => {
+      const h = harness(payAndDone(), { pages: payPage });
+      const state = await new AgentRunner({ ...cfg, autonomous: true, approvalWindowSec: 120 }, h.deps).run();
+      expect(h.states.some((s) => s.status === 'awaiting_approval' && s.pendingApproval?.deadline)).toBe(true);
+      expect(h.deferred).toHaveLength(1);
+      expect(state.status).toBe('done');
+    });
+
+    it('автономный режим: пошаговый режим не действует, ask_user — модель решает сама', async () => {
+      const h = harness([reply([{ action: 'click', index: 2 }]), reply([{ action: 'ask_user', question: 'Какой цвет?' }]), reply([{ action: 'done', result: 'ok' }])]);
+      const state = await new AgentRunner({ ...cfg, autonomous: true, approveEachStep: true }, h.deps).run();
+      expect(state.status).toBe('done');
+      expect(h.executed).toHaveLength(1);
+      expect(state.steps[1]!.notes[0]).toMatch(/asleep/);
+      expect(h.states.some((s) => s.status === 'asking_user' || s.status === 'awaiting_approval')).toBe(false);
+    });
+
+    it('запрет на сайте: действие не выполняется, модель узнаёт об этом', async () => {
+      const siteNotes = [{ pattern: 'shop.example', notes: '', hide: '', risk: 'block' as const, safe: '' }];
+      const h = harness(payAndDone(), { pages: payPage });
+      const state = await new AgentRunner({ ...cfg, siteNotes }, h.deps).run();
+      expect(h.executed).toHaveLength(1); // только ввод комментария
+      expect(state.steps[0]!.actions[1]!.result?.ok).toBe(false);
+      expect(state.steps[0]!.notes[0]).toMatch(/^BLOCKED/);
+      expect(h.deferred).toHaveLength(0);
+    });
+
+    it('разрешение на сайте: выполняется без подтверждения', async () => {
+      const siteNotes = [{ pattern: 'shop.example', notes: '', hide: '', risk: 'allow' as const, safe: '' }];
+      const h = harness(payAndDone(), { pages: payPage });
+      const state = await new AgentRunner({ ...cfg, siteNotes }, h.deps).run();
+      expect(state.status).toBe('done');
+      expect(h.executed).toHaveLength(2);
+    });
+
+    it('ввод пароля определяется по флагам элемента', async () => {
+      const h = harness([reply([{ action: 'type', index: 2, text: 'secret', submit: false }])], { flags: { 2: ['secret'] } });
+      const runner = new AgentRunner(cfg, h.deps);
+      const done = runner.run();
+      await until(runner, 'awaiting_approval');
+      expect(runner.state.pendingApproval!.actions[0]!.risk?.[0]?.kind).toBe('secret');
+      runner.stop();
+      await done;
+    });
+  });
+
+  describe('этап 6: чекпоинты', () => {
+    it('перед действием в чекпоинте записано, какое действие выполняется', async () => {
+      const h = harness([reply([{ action: 'click', index: 1 }, { action: 'click', index: 2 }]), reply([{ action: 'done', result: 'ok' }])]);
+      const state = await new AgentRunner(cfg, h.deps).run();
+      expect(h.checkpoints.map((c) => c.inFlight)).toEqual([
+        { step: 1, action: 0 },
+        { step: 1, action: 1 },
+      ]);
+      expect(state.inFlight).toBeUndefined();
+      expect(state.loop?.count).toBe(1);
+    });
+
+    it('продолжение после перезапуска: прерванное действие помечено, модель предупреждена', async () => {
+      // Первый запуск «умер» посреди второго действия.
+      const first = harness([reply([{ action: 'click', index: 1 }, { action: 'click', index: 2 }, { action: 'scroll', direction: 'down', amount: 1 }])]);
+      first.deps.execute = vi.fn(async (a: AgentAction) => (a.action === 'click' && a.index === 2 ? new Promise<ActionResult>(() => {}) : { ok: true, message: 'ok' }));
+      void new AgentRunner({ ...cfg, stepTimeoutSec: 3600 }, first.deps).run();
+      for (let i = 0; i < 50 && first.checkpoints.length < 2; i++) await new Promise((r) => setTimeout(r, 0));
+      const saved = first.checkpoints.at(-1)!;
+      expect(saved.inFlight).toEqual({ step: 1, action: 1 });
+
+      const second = harness([reply([{ action: 'done', result: 'ok' }])]);
+      const state = await new AgentRunner(cfg, second.deps, structuredClone(saved)).run();
+      expect(state.status).toBe('done');
+      expect(state.restarts).toBe(1);
+      const acts = state.steps[0]!.actions;
+      expect(acts[0]!.result?.ok).toBe(true);
+      expect(acts[1]!.result).toEqual({ ok: false, message: 'interrupted by a restart — it may or may not have happened' });
+      expect(acts[2]!.skipped).toBe('not executed: the agent was restarted');
+      const prompt = vi.mocked(second.deps.chat).mock.calls[0]![0].at(-1)!.content;
+      expect(prompt).toContain('note: The agent was restarted');
+      expect(prompt).toContain('interrupted by a restart');
+    });
+
+    it('шаг, ждущий одобрения или ответа, попадает в чекпоинт до ожидания', async () => {
+      const h = harness([reply([{ action: 'click', index: 1 }])], { pages: ['[1] button "Удалить"'] });
+      const runner = new AgentRunner(cfg, h.deps);
+      const done = runner.run();
+      await until(runner, 'awaiting_approval');
+      const cp = h.checkpoints.at(-1)!;
+      expect(cp.status).toBe('awaiting_approval');
+      expect(cp.steps).toHaveLength(1);
+      runner.stop();
+      await done;
+
+      const h2 = harness([reply([{ action: 'ask_user', question: 'Какой?' }])]);
+      const r2 = new AgentRunner(cfg, h2.deps);
+      const d2 = r2.run();
+      await until(r2, 'asking_user');
+      expect(h2.checkpoints.at(-1)).toMatchObject({ status: 'asking_user', question: 'Какой?' });
+      r2.stop();
+      await d2;
+    });
+
+    it('после перезапуска незаданный вопрос ask_user ждёт ответа, одобрение — перепланируется', async () => {
+      const base: RunState = {
+        id: 'old',
+        task: cfg.task,
+        profileLabel: 'Быстрый',
+        model: 'qwen3',
+        status: 'asking_user',
+        question: 'Какой город?',
+        startedAt: 1,
+        maxSteps: 10,
+        extracted: ['цена 100'],
+        steps: [{ n: 1, startedAt: 1, url: 'https://shop.example/', reasoning: '', expectedOutcome: '', actions: [{ action: { action: 'ask_user', question: 'Какой город?' }, result: { ok: true, message: 'question shown to the user' } }], warnings: [], notes: [] }],
+      };
+      const h = harness([reply([{ action: 'done', result: 'ok' }])]);
+      const runner = new AgentRunner(cfg, h.deps, structuredClone(base));
+      const done = runner.run();
+      await until(runner, 'asking_user');
+      runner.answer('Казань');
+      const state = await done;
+      expect(state.id).toBe('old');
+      expect(state.extracted).toEqual(['цена 100']);
+      expect(state.steps[0]!.notes).toEqual([expect.stringMatching(/restarted/), 'User answered: Казань']);
+
+      const pending: RunState = { ...structuredClone(base), status: 'awaiting_approval', question: undefined, pendingApproval: { actions: [], reasoning: '' } };
+      delete pending.question;
+      const h2 = harness([reply([{ action: 'done', result: 'ok' }])]);
+      const s2 = await new AgentRunner(cfg, h2.deps, pending).run();
+      expect(s2.status).toBe('done');
+      expect(s2.pendingApproval).toBeUndefined();
+    });
+
+    it('ночью прерванный вопрос не ждёт ответа', async () => {
+      const base: RunState = {
+        id: 'old', task: cfg.task, profileLabel: '', model: '', status: 'asking_user', question: '?', startedAt: 1, maxSteps: 10, extracted: [],
+        steps: [{ n: 1, startedAt: 1, url: '', reasoning: '', expectedOutcome: '', actions: [], warnings: [], notes: [] }],
+      };
+      const h = harness([reply([{ action: 'done', result: 'ok' }])]);
+      const state = await new AgentRunner({ ...cfg, autonomous: true }, h.deps, base).run();
+      expect(state.status).toBe('done');
+      expect(state.steps[0]!.notes.join('\n')).toMatch(/asleep/);
+    });
+  });
+
+  describe('застревание: принудительная прокрутка вниз', () => {
+    // Как на тренажёре Практикума: код вставлен, «Проверить» неактивна, модель вставляет код снова.
+    const lesson = 'URL: https://practicum.yandex.ru/learn/x\nScroll: y=0 of 2000 (0%), viewport 1200x800\n[21] code-editor lines="19"\n[22] button "Проверить" disabled';
+    const typeCode = { action: 'type', index: 21, text: '<!DOCTYPE html>', submit: false };
+    const exec = (a: AgentAction): ActionResult =>
+      a.action === 'click' ? { ok: false, message: 'element [22] is disabled' } : a.action === 'scroll' ? { ok: true, message: 'scrolled' } : { ok: true, message: 'typed' };
+
+    it('после N шагов без пользы агент сам прокручивает вниз и говорит об этом модели', async () => {
+      const h = harness(
+        [reply([typeCode, { action: 'click', index: 22 }]), reply([typeCode]), reply([{ action: 'done', result: 'ok' }])],
+        { pages: [lesson, lesson, lesson.replace('y=0', 'y=800')], exec },
+      );
+      const state = await new AgentRunner({ ...cfg, autoScrollAfter: 2 }, h.deps).run();
+      expect(h.executed.map((a) => a.action)).toEqual(['type', 'click', 'type', 'scroll']);
+      expect(state.steps[0]!.notes).toEqual([]);
+      expect(state.steps[1]!.notes[0]).toMatch(/^AUTO-SCROLL/);
+      expect(vi.mocked(h.deps.chat).mock.calls[2]![0].at(-1)!.content).toContain('note: AUTO-SCROLL');
+    });
+
+    it('внизу страницы не крутит, а прямо говорит, что модель ходит по кругу', async () => {
+      const bottom = lesson.replace('y=0 of 2000 (0%)', 'y=2000 of 2000 (100%)');
+      const h = harness([reply([typeCode, { action: 'click', index: 22 }]), reply([typeCode]), reply([{ action: 'done', result: 'ok' }])], { pages: [bottom], exec });
+      const state = await new AgentRunner({ ...cfg, autoScrollAfter: 2 }, h.deps).run();
+      expect(h.executed.map((a) => a.action)).not.toContain('scroll');
+      expect(state.steps[1]!.notes[0]).toMatch(/^STUCK/);
+    });
+
+    it('полезные шаги на той же странице (заполнение формы) не считаются застреванием', async () => {
+      const form = 'URL: https://x.example/form\nScroll: y=0 of 2000 (0%)\n[1] input "Имя"\n[2] input "Город"';
+      const h = harness(
+        [reply([{ action: 'type', index: 1, text: 'Илья', submit: false }]), reply([{ action: 'type', index: 2, text: 'Воронеж', submit: false }]), reply([{ action: 'done', result: 'ok' }])],
+        { pages: [form] },
+      );
+      await new AgentRunner({ ...cfg, autoScrollAfter: 2 }, h.deps).run();
+      expect(h.executed.map((a) => a.action)).toEqual(['type', 'type']);
+    });
   });
 });

@@ -62,7 +62,11 @@ export function App() {
         />
       </label>
 
-      {settings.agent.autonomous && <div class="warn">Автономный режим: рискованные действия уйдут в очередь на утро.</div>}
+      {settings.agent.autonomous && (
+        <div class="warn">
+          Автономный режим: рискованные действия ждут подтверждения {settings.safety.approvalWindowSec} с{settings.safety.sound ? ' со звуком' : ''}, затем уходят в очередь на утро.
+        </div>
+      )}
 
       <AgentPanel task={task} settings={settings} />
 

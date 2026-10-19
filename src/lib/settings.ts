@@ -1,7 +1,9 @@
 import { storage } from '#imports';
+import { DEFAULT_RISK_RULES, type RiskRules, type SiteRiskMode } from './agent/risk';
 import type { SiteNote } from './agent/site-notes';
+import { PROVIDERS, type ProviderId } from './llm/providers';
 
-export type ProfileId = 'fast' | 'slow';
+export type ProfileId = 'fast' | 'slow' | 'cloud';
 
 /** Как просить у сервера структурированный ответ. */
 export type StructuredOutputMode = 'auto' | 'json_schema' | 'json_object' | 'off';
@@ -9,7 +11,9 @@ export type StructuredOutputMode = 'auto' | 'json_schema' | 'json_object' | 'off
 export interface LlmProfile {
   /** Отображаемое имя профиля. */
   label: string;
-  /** Адрес сервера без суффикса /v1, например http://192.168.1.10:11434 */
+  /** Свой сервер или облачный провайдер — определяет префикс пути API и детали запроса. */
+  provider: ProviderId;
+  /** Адрес сервера без префикса API, например http://192.168.1.10:11434 */
   baseUrl: string;
   apiKey: string;
   model: string;
@@ -40,6 +44,8 @@ export interface AgentSettings {
   stepTimeoutSec: number;
   /** Сколько одинаковых действий подряд без изменения страницы считать зацикливанием. */
   loopThreshold: number;
+  /** Столько шагов подряд без пользы на одном месте — и агент сам прокручивает вниз (0 — выкл). */
+  autoScrollAfter: number;
   /** Жёсткий лимит символов на наблюдение (сериализованную страницу). */
   maxObservationChars: number;
   /** Пошаговый режим: перед выполнением действий агент ждёт «Выполнить» от человека. */
@@ -51,6 +57,15 @@ export interface AgentSettings {
   debugOverlay: boolean;
 }
 
+export interface SafetySettings {
+  /** Словари рискованных кнопок и адресов оплаты. */
+  rules: RiskRules;
+  /** Звук и системное уведомление, когда в автономном режиме агент упёрся в рискованное действие. */
+  sound: boolean;
+  /** Автономный режим: сколько ждать подтверждения, прежде чем отложить действие в очередь (0 — сразу). */
+  approvalWindowSec: number;
+}
+
 export interface LoggingSettings {
   remoteEnabled: boolean;
   remoteUrl: string;
@@ -60,6 +75,7 @@ export interface Settings {
   activeProfile: ProfileId;
   profiles: Record<ProfileId, LlmProfile>;
   agent: AgentSettings;
+  safety: SafetySettings;
   logging: LoggingSettings;
   /** Подсказки для конкретных сайтов («Узнать ответ» = проверить и т.п.). */
   siteNotes: SiteNote[];
@@ -70,6 +86,7 @@ export const DEFAULT_SETTINGS: Settings = {
   profiles: {
     fast: {
       label: 'Быстрый',
+      provider: 'openai',
       baseUrl: 'http://192.168.1.10:11434',
       apiKey: '',
       model: 'qwen3:14b',
@@ -83,6 +100,7 @@ export const DEFAULT_SETTINGS: Settings = {
     },
     slow: {
       label: 'Ночной',
+      provider: 'openai',
       baseUrl: 'http://192.168.1.10:11434',
       apiKey: '',
       model: 'qwen3:32b',
@@ -94,18 +112,38 @@ export const DEFAULT_SETTINGS: Settings = {
       thinking: true,
       extraBody: '',
     },
+    cloud: {
+      label: 'Облако',
+      provider: 'google',
+      baseUrl: PROVIDERS.google.baseUrl,
+      apiKey: '',
+      model: PROVIDERS.google.model,
+      temperature: 0.4,
+      contextTokens: 131_072,
+      maxOutputTokens: 4096,
+      requestTimeoutSec: 180,
+      structuredOutput: 'auto',
+      thinking: true,
+      extraBody: '',
+    },
   },
   agent: {
     maxSteps: 40,
     maxActionsPerStep: 4,
     stepTimeoutSec: 60,
     loopThreshold: 3,
-    approveEachStep: true,
+    autoScrollAfter: 2,
+    approveEachStep: false,
     maxObservationChars: 12000,
     autonomous: false,
     useDebugger: true,
     showCursor: true,
     debugOverlay: false,
+  },
+  safety: {
+    rules: DEFAULT_RISK_RULES,
+    sound: true,
+    approvalWindowSec: 120,
   },
   logging: {
     remoteEnabled: false,
@@ -116,9 +154,11 @@ export const DEFAULT_SETTINGS: Settings = {
 
 const MAX_SITE_NOTES = 50;
 const MAX_NOTE_CHARS = 4000;
+const MAX_RULE_CHARS = 4000;
+const RISK_MODES: readonly SiteRiskMode[] = ['ask', 'allow', 'block'];
 
 const STRUCTURED_MODES: readonly StructuredOutputMode[] = ['auto', 'json_schema', 'json_object', 'off'];
-const PROFILE_IDS: readonly ProfileId[] = ['fast', 'slow'];
+const PROFILE_IDS: readonly ProfileId[] = ['fast', 'slow', 'cloud'];
 
 type Unknown<T> = { [K in keyof T]?: unknown };
 
@@ -146,6 +186,7 @@ function sanitizeProfile(raw: unknown, def: LlmProfile): LlmProfile {
   const mode = r.structuredOutput;
   return {
     label: str(r.label, def.label),
+    provider: typeof r.provider === 'string' && r.provider in PROVIDERS ? (r.provider as ProviderId) : def.provider,
     baseUrl: str(r.baseUrl, def.baseUrl).trim(),
     apiKey: str(r.apiKey, def.apiKey).trim(),
     model: str(r.model, def.model).trim(),
@@ -181,12 +222,24 @@ function sanitizeAgent(raw: unknown, def: AgentSettings): AgentSettings {
     maxActionsPerStep: num(r.maxActionsPerStep, def.maxActionsPerStep, 1, 10, true),
     stepTimeoutSec: num(r.stepTimeoutSec, def.stepTimeoutSec, 5, 3600, true),
     loopThreshold: num(r.loopThreshold, def.loopThreshold, 2, 20, true),
+    autoScrollAfter: num(r.autoScrollAfter, def.autoScrollAfter, 0, 20, true),
     maxObservationChars: num(r.maxObservationChars, def.maxObservationChars, 1000, 500_000, true),
     approveEachStep: bool(r.approveEachStep, def.approveEachStep),
     autonomous: bool(r.autonomous, def.autonomous),
     useDebugger: bool(r.useDebugger, def.useDebugger),
     showCursor: bool(r.showCursor, def.showCursor),
     debugOverlay: bool(r.debugOverlay, def.debugOverlay),
+  };
+}
+
+function sanitizeSafety(raw: unknown, def: SafetySettings): SafetySettings {
+  const r: Unknown<SafetySettings> = isRecord(raw) ? raw : {};
+  const rules: Unknown<RiskRules> = isRecord(r.rules) ? r.rules : {};
+  const rule = (k: keyof RiskRules) => str(rules[k], def.rules[k]).slice(0, MAX_RULE_CHARS);
+  return {
+    rules: { payment: rule('payment'), delete: rule('delete'), send: rule('send'), paymentUrls: rule('paymentUrls') },
+    sound: bool(r.sound, def.sound),
+    approvalWindowSec: num(r.approvalWindowSec, def.approvalWindowSec, 0, 3600, true),
   };
 }
 
@@ -205,8 +258,10 @@ export function sanitizeSettings(raw: unknown, defaults: Settings = DEFAULT_SETT
     profiles: {
       fast: sanitizeProfile(rawProfiles.fast, defaults.profiles.fast),
       slow: sanitizeProfile(rawProfiles.slow, defaults.profiles.slow),
+      cloud: sanitizeProfile(rawProfiles.cloud, defaults.profiles.cloud),
     },
     agent: sanitizeAgent(r.agent, defaults.agent),
+    safety: sanitizeSafety(r.safety, defaults.safety),
     logging: {
       remoteEnabled: bool(logging.remoteEnabled, defaults.logging.remoteEnabled),
       remoteUrl: str(logging.remoteUrl, defaults.logging.remoteUrl).trim(),
@@ -218,6 +273,8 @@ export function sanitizeSettings(raw: unknown, defaults: Settings = DEFAULT_SETT
             pattern: str(n.pattern, '').trim(),
             notes: str(n.notes, '').slice(0, MAX_NOTE_CHARS),
             hide: str(n.hide, '').slice(0, MAX_NOTE_CHARS),
+            risk: RISK_MODES.includes(n.risk as SiteRiskMode) ? (n.risk as SiteRiskMode) : 'ask',
+            safe: str(n.safe, '').slice(0, MAX_NOTE_CHARS),
           }))
           .slice(0, MAX_SITE_NOTES)
       : defaults.siteNotes,
