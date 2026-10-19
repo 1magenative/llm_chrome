@@ -2,7 +2,7 @@
   "name": "llm-browser-agent",
   "description": "Браузерный агент на локальной LLM (OpenAI-совместимый сервер в локальной сети)",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
     "dev": "wxt",

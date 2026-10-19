@@ -64,7 +64,7 @@ describe('настройки этапа 6', () => {
 
   it('старые настройки без safety и полей заметок дополняются', () => {
     const s = sanitizeSettings({ siteNotes: [{ pattern: 'hh.ru', notes: 'x', hide: '' }], safety: { approvalWindowSec: 99999, rules: { send: 'сдать' } } });
-    expect(s.siteNotes[0]).toEqual({ pattern: 'hh.ru', notes: 'x', hide: '', risk: 'ask', safe: '' });
+    expect(s.siteNotes[0]).toEqual({ pattern: 'hh.ru', notes: 'x', hide: '', risk: 'ask', safe: '', next: '' });
     expect(s.safety.approvalWindowSec).toBe(3600);
     expect(s.safety.rules.send).toBe('сдать');
     expect(s.safety.rules.payment).toBe(DEFAULT_SETTINGS.safety.rules.payment);

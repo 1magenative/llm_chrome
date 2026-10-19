@@ -2,7 +2,9 @@ import { browser, defineBackground } from '#imports';
 import systemTemplate from '@/prompts/system.md?raw';
 import { newBoundary, type TabInfo } from '@/lib/agent/prompt';
 import { resumeTask, sameUrl, type RunCheckpoint } from '@/lib/agent/queue';
-import { hiddenNamesFor, type SiteNote } from '@/lib/agent/site-notes';
+import { assessAction, sitePolicyFor } from '@/lib/agent/risk';
+import { Skipper, type SkipState } from '@/lib/agent/skipper';
+import { hiddenNamesFor, nextRulesFor, type SiteNote } from '@/lib/agent/site-notes';
 import { AgentRunner, type Observation, type RunConfig } from '@/lib/agent/runner';
 import type { StepEvent } from '@/lib/agent/step';
 import { TERMINAL_STATUSES, type RunState } from '@/lib/agent/types';
@@ -93,7 +95,7 @@ async function observeAgentTab(tab: AgentTab, maxChars: number, highlight: boole
       url,
     };
   }
-  const obs = await observePage(tab.tabId, url, { maxChars, highlight, hide: hiddenNamesFor(url, siteNotes) });
+  const obs = await observePage(tab.tabId, url, { maxChars, highlight, hide: hiddenNamesFor(url, siteNotes), next: nextRulesFor(url, siteNotes) });
   return { observation: obs.text, tabs, handle: obs.handle, url };
 }
 
@@ -206,7 +208,55 @@ async function launch(settings: Settings, profileId: ProfileId, cfg: RunConfig, 
   return runner.state;
 }
 
+// ——— пролистывание курса без модели ———
+
+let skipping: { skipper: Skipper; state: SkipState } | null = null;
+
+async function startSkip(windowId: number): Promise<void> {
+  ensureIdle();
+  const settings = await loadSettings();
+  const active = await activeTab(windowId);
+  const tab: AgentTab = { tabId: active.id, windowId };
+  const debuggers = settings.agent.useDebugger ? new DebuggerSessions() : null;
+  const exec: ExecContext = {
+    tab,
+    cdp: debuggers ? (tabId) => debuggers.driverFor(tabId) : undefined,
+    cdpUnavailable: () => debuggers?.unavailableReason ?? '',
+    showCursor: settings.agent.showCursor,
+  };
+  const skipper = new Skipper({
+    observe: async () => {
+      const obs = await observeAgentTab(tab, settings.agent.maxObservationChars, false, settings.siteNotes);
+      return { url: obs.url, elements: obs.handle.elements ?? [], handle: obs.handle };
+    },
+    click: (index, handle) => executeAction({ action: 'click', index }, handle, exec),
+    scrollToBottom: async (handle) => {
+      for (let i = 0; i < 6; i++) {
+        const r = await executeAction({ action: 'scroll', direction: 'down', amount: 10 }, handle, exec);
+        if (!r.ok || /already at the bottom/.test(r.message)) break;
+      }
+    },
+    isRisky: (line, url) =>
+      assessAction({ action: { action: 'click', index: 1 }, target: line, flags: [], url, modelFlag: false, rules: settings.safety.rules, policy: sitePolicyFor(url, settings.siteNotes) })
+        .length > 0,
+    sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+    onState: (state) => {
+      if (skipping) skipping.state = state;
+      broadcast({ type: 'ui:skip-state', state });
+    },
+  });
+  skipping = { skipper, state: skipper.state };
+  const stopKeepAlive = startKeepAlive();
+  void skipper.run().finally(() => {
+    stopKeepAlive();
+    void debuggers?.detachAll();
+  });
+}
+
+const skipRunning = () => skipping?.state.status === 'running';
+
 function ensureIdle(): void {
+  if (skipRunning()) throw new Error('Идёт пролистывание — сначала остановите его.');
   if (current && !TERMINAL_STATUSES.has(current.runner.state.status)) throw new Error('Агент уже работает — остановите текущую задачу.');
   if (interrupted) throw new Error('Есть прерванная задача — продолжите или отмените её в панели.');
 }
@@ -327,7 +377,8 @@ async function handle(msg: BackgroundRequest): Promise<Result<unknown>> {
       const tab = await activeTab(msg.windowId);
       const settings = await loadSettings();
       const hide = tab.url ? hiddenNamesFor(tab.url, settings.siteNotes) : [];
-      const page = await observePage(tab.id, tab.url, { maxChars: settings.agent.maxObservationChars, highlight: msg.highlight, hide });
+      const next = tab.url ? nextRulesFor(tab.url, settings.siteNotes) : [];
+      const page = await observePage(tab.id, tab.url, { maxChars: settings.agent.maxObservationChars, highlight: msg.highlight, hide, next });
       return { ok: true, value: { text: page.text, stats: page.stats } };
     }
     case 'bg:highlight': {
@@ -370,6 +421,14 @@ async function handle(msg: BackgroundRequest): Promise<Result<unknown>> {
       await setDeferredStatus(msg.id, 'dismissed');
       broadcast({ type: 'ui:queue-changed' });
       return { ok: true, value: null };
+    case 'bg:skip-start':
+      await startSkip(msg.windowId);
+      return { ok: true, value: null };
+    case 'bg:skip-stop':
+      skipping?.skipper.stop();
+      return { ok: true, value: null };
+    case 'bg:skip-get':
+      return { ok: true, value: skipping?.state ?? null };
     case 'bg:alert-test': {
       const settings = await loadSettings();
       await alertHuman('Проверка сигнала', 'Так агент позовёт вас, когда ночью упрётся в рискованное действие.', settings.safety.sound);

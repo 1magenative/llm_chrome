@@ -11,6 +11,8 @@ export interface SiteNote {
   risk: SiteRiskMode;
   /** Тексты кнопок, для которых подтверждение не нужно — по одному на строку. */
   safe: string;
+  /** Кнопка перехода дальше («Далее» с шуточным текстом или одними эмодзи): текст или `css:` — модель увидит пометку NEXT. */
+  next: string;
 }
 
 interface ParsedPattern {
@@ -46,9 +48,18 @@ export function noteMatches(url: string, pattern: string): boolean {
 
 /** Правила «скрыть от модели» для страницы (без пустых; текст или `css: селектор` — см. dom/hide-rules.ts). */
 export function hiddenNamesFor(url: string, notes: readonly SiteNote[]): string[] {
+  return rulesFor(url, notes, 'hide');
+}
+
+/** Правила кнопки «Далее» для страницы (как «скрыть», но элемент помечается, а не прячется). */
+export function nextRulesFor(url: string, notes: readonly SiteNote[]): string[] {
+  return rulesFor(url, notes, 'next');
+}
+
+function rulesFor(url: string, notes: readonly SiteNote[], field: 'hide' | 'next'): string[] {
   return notes
     .filter((n) => noteMatches(url, n.pattern))
-    .flatMap((n) => n.hide.split('\n'))
+    .flatMap((n) => n[field].split('\n'))
     .map((s) => s.trim())
     .filter(Boolean);
 }
@@ -66,17 +77,17 @@ export function sitePatternFor(url: string): string {
  * Добавляет правило «Скрыть от модели» в заметку с этим шаблоном (создаёт её, если нет).
  * Повтор не дублируется.
  */
-export function addHideRule(notes: readonly SiteNote[], pattern: string, rule: string): SiteNote[] {
+export function addHideRule(notes: readonly SiteNote[], pattern: string, rule: string, field: 'hide' | 'next' = 'hide'): SiteNote[] {
   const r = rule.trim();
   const p = pattern.trim();
   if (!r || !p) return [...notes];
   const i = notes.findIndex((n) => n.pattern.trim().toLowerCase() === p.toLowerCase());
-  if (i === -1) return [...notes, { pattern: p, notes: '', hide: r, risk: 'ask', safe: '' }];
+  if (i === -1) return [...notes, { pattern: p, notes: '', hide: '', risk: 'ask', safe: '', next: '', [field]: r }];
   const note = notes[i]!;
-  const lines = note.hide.split('\n').map((l) => l.trim()).filter(Boolean);
+  const lines = note[field].split('\n').map((l) => l.trim()).filter(Boolean);
   if (lines.includes(r)) return [...notes];
   const copy = [...notes];
-  copy[i] = { ...note, hide: [...lines, r].join('\n') };
+  copy[i] = { ...note, [field]: [...lines, r].join('\n') };
   return copy;
 }
 

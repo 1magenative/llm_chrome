@@ -1,4 +1,5 @@
 import { browser } from '#imports';
+import type { SkipState } from './agent/skipper';
 import type { StepEvent } from './agent/step';
 import type { ActionResult, DeferredItem, RunState, RunSummary, StepDetail } from './agent/types';
 import type { ClickPoint } from './dom/act';
@@ -65,7 +66,7 @@ export interface HidePick {
 /** background → content script */
 export type ContentRequest =
   | { type: 'content:ping' }
-  | { type: 'content:observe'; maxChars: number; hide: string[]; indexBase: number; frame?: FrameGeometry }
+  | { type: 'content:observe'; maxChars: number; hide: string[]; next?: string[]; indexBase: number; frame?: FrameGeometry }
   /** После склейки фреймов: какие номера попали в текст — их и подсвечиваем. */
   | { type: 'content:show'; snapshotId: number; shown: number[]; highlight: boolean }
   | { type: 'content:frame-tag' }
@@ -82,7 +83,7 @@ export type ContentRequest =
   | { type: 'content:pick'; maxChars: number; hide: string[] }
   | { type: 'content:pick-cancel' }
   /** Выбор элемента мышью, чтобы скрыть его от модели: ответ — предложенное правило. */
-  | { type: 'content:pick-rule'; maxChars: number; hide: string[] }
+  | { type: 'content:pick-rule'; maxChars: number; hide: string[]; preferSelector?: boolean }
   | { type: 'content:act'; action: DomAction; snapshotId: number };
 
 /** UI → background */
@@ -104,7 +105,11 @@ export type BackgroundRequest =
   | { type: 'bg:queue-resume'; id: string; windowId: number }
   | { type: 'bg:queue-dismiss'; id: string }
   /** Проверить звук и уведомление из настроек. */
-  | { type: 'bg:alert-test' };
+  | { type: 'bg:alert-test' }
+  /** Пролистывание курса без модели (см. lib/agent/skipper.ts). */
+  | { type: 'bg:skip-start'; windowId: number }
+  | { type: 'bg:skip-stop' }
+  | { type: 'bg:skip-get' };
 
 /** Текущий запуск для панели; interrupted — прерван перезапуском и ждёт «Продолжить». */
 export interface RunInfo {
@@ -116,7 +121,8 @@ export interface RunInfo {
 export type UiEvent =
   | { type: 'ui:step-progress'; event: StepEvent }
   | { type: 'ui:run-state'; info: RunInfo }
-  | { type: 'ui:queue-changed' };
+  | { type: 'ui:queue-changed' }
+  | { type: 'ui:skip-state'; state: SkipState };
 
 export function isUiEvent(msg: unknown): msg is UiEvent {
   return hasType(msg, 'ui:');
@@ -158,6 +164,9 @@ export interface BackgroundResponses {
   'bg:queue-resume': RunState;
   'bg:queue-dismiss': null;
   'bg:alert-test': null;
+  'bg:skip-start': null;
+  'bg:skip-stop': null;
+  'bg:skip-get': SkipState | null;
 }
 
 function hasType(msg: unknown, prefix: string): msg is { type: string } {

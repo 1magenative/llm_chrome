@@ -1,7 +1,16 @@
 import { browser } from '#imports';
-import type { ObservationHandle } from './agent/types';
-import { serializePage } from './dom/serialize';
-import type { ElementFlag, Rect } from './dom/types';
+import type { ElementBrief, ObservationHandle } from './agent/types';
+import { serializeElement, serializePage } from './dom/serialize';
+import type { ElementFlag, ElementInfo, Rect } from './dom/types';
+
+const NOT_CLICKABLE_TYPES = new Set(['text', 'email', 'search', 'tel', 'url', 'password', 'number', 'date', 'datetime-local', 'month', 'time', 'week', 'file', '']);
+
+/** Кнопки, ссылки, переключатели — да; поля ввода, списки и редакторы кода — нет. */
+function isClickable(e: ElementInfo): boolean {
+  if (e.tag === 'textarea' || e.tag === 'select' || e.tag === 'code-editor' || e.contentEditable) return false;
+  if (e.tag === 'input') return !NOT_CLICKABLE_TYPES.has(e.type ?? '');
+  return true;
+}
 import { buildFrameTree, mergeObservations, type FrameInfoReport, type FrameNode, type FrameTagReport, type RawFrameObservation } from './frames';
 import type { ContentRequest, ContentResponses, ObserveResult, Result } from './messages';
 
@@ -82,6 +91,8 @@ export interface ObserveOptions {
   highlight: boolean;
   /** Тексты «скрыть от модели» (нижний регистр). */
   hide: string[];
+  /** Правила кнопки «Далее» (см. nextRulesFor). */
+  next?: string[];
 }
 
 /**
@@ -119,6 +130,7 @@ export async function observePage(tabId: number, url: string | undefined, opts: 
           type: 'content:observe',
           maxChars: opts.maxChars,
           hide: opts.hide,
+          next: opts.next,
           indexBase,
           frame: node.frameId === 0 ? undefined : { offset: node.offset, clip: node.clip, viewport },
         },
@@ -142,6 +154,16 @@ export async function observePage(tabId: number, url: string | undefined, opts: 
 
   const owner: Record<number, number> = {};
   const flags: Record<number, ElementFlag[]> = {};
+  const elements: ElementBrief[] = snapshot.elements.map((e) => ({
+    index: e.index,
+    line: serializeElement(e).replace(/^\[\d+\] /, ''),
+    y: Math.round(e.rect.y + snapshot.scroll.y),
+    disabled: e.states.includes('disabled'),
+    next: !!e.next,
+    clickable: isClickable(e),
+    pinned: !!e.pinned,
+    inFrame: !!e.inFrame,
+  }));
   for (const { node, obs } of parts) {
     for (const e of obs.elements) {
       owner[e.index] = node.frameId;
@@ -166,7 +188,7 @@ export async function observePage(tabId: number, url: string | undefined, opts: 
       walkTruncated: snapshot.stats.walkTruncated,
       durationMs: Math.round(performance.now() - started),
     },
-    handle: { frames: parts.map((p) => ({ frameId: p.node.frameId, snapshotId: p.obs.snapshotId })), owner, nodes, flags },
+    handle: { frames: parts.map((p) => ({ frameId: p.node.frameId, snapshotId: p.obs.snapshotId })), owner, nodes, flags, elements },
   };
 }
 

@@ -25,10 +25,10 @@ describe('noteMatches', () => {
 describe('siteNotesFor', () => {
   it('собирает все подходящие заметки и пропускает пустые', () => {
     const notes = [
-      { pattern: 'yandex.ru', notes: 'Общее для Яндекса', hide: '', risk: 'ask' as const, safe: '' },
-      { pattern: 'practicum.yandex.ru/learn', notes: '«Узнать ответ» = проверить ответ', hide: 'Оценить\n  \nСбросить ', risk: 'ask' as const, safe: '' },
-      { pattern: 'hh.ru', notes: 'Про hh', hide: '', risk: 'ask' as const, safe: '' },
-      { pattern: 'practicum.yandex.ru', notes: '   ', hide: '', risk: 'ask' as const, safe: '' },
+      { pattern: 'yandex.ru', notes: 'Общее для Яндекса', hide: '', risk: 'ask' as const, safe: '', next: '' },
+      { pattern: 'practicum.yandex.ru/learn', notes: '«Узнать ответ» = проверить ответ', hide: 'Оценить\n  \nСбросить ', risk: 'ask' as const, safe: '', next: '' },
+      { pattern: 'hh.ru', notes: 'Про hh', hide: '', risk: 'ask' as const, safe: '', next: '' },
+      { pattern: 'practicum.yandex.ru', notes: '   ', hide: '', risk: 'ask' as const, safe: '', next: '' },
     ];
     expect(siteNotesFor(lesson, notes)).toBe('Общее для Яндекса\n«Узнать ответ» = проверить ответ');
     expect(siteNotesFor('https://hh.ru/vacancy/1', notes)).toBe('Про hh');
@@ -63,8 +63,8 @@ describe('заметки в промпте и настройках', () => {
   it('sanitizeSettings чистит мусор в заметках', () => {
     const s = sanitizeSettings({ siteNotes: [{ pattern: ' practicum.yandex.ru ', notes: 'x' }, 'мусор', { notes: 5 }] });
     expect(s.siteNotes).toEqual([
-      { pattern: 'practicum.yandex.ru', notes: 'x', hide: '', risk: 'ask' as const, safe: '' },
-      { pattern: '', notes: '', hide: '', risk: 'ask' as const, safe: '' },
+      { pattern: 'practicum.yandex.ru', notes: 'x', hide: '', risk: 'ask' as const, safe: '', next: '' },
+      { pattern: '', notes: '', hide: '', risk: 'ask' as const, safe: '', next: '' },
     ]);
     expect(sanitizeSettings({}).siteNotes).toEqual([]);
   });

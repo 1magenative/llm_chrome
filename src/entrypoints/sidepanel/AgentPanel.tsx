@@ -4,6 +4,7 @@ import { TERMINAL_STATUSES, type RunState, type RunStatus } from '@/lib/agent/ty
 import { isUiEvent, sendToBackground, type RunInfo } from '@/lib/messages';
 import { saveSettings, type Settings } from '@/lib/settings';
 import { Queue } from './Queue';
+import { SkipPanel } from './SkipPanel';
 import { ActionLine, StepCard } from './StepCard';
 
 export const STATUS_LABELS: Record<RunStatus, string> = {
@@ -230,6 +231,8 @@ export function AgentPanel({ task, settings }: { task: string; settings: Setting
           </ol>
         </details>
       )}
+
+      <SkipPanel busy={active || interrupted} />
 
       <Queue busy={active || interrupted} />
 

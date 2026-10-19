@@ -74,7 +74,7 @@ describe('suggestHideRule — правило по клику', () => {
 });
 
 describe('addHideRule — запись в заметку сайта', () => {
-  const base: SiteNote[] = [{ pattern: 'practicum.yandex.ru', notes: 'n', hide: 'Оценить', risk: 'ask', safe: '' }];
+  const base: SiteNote[] = [{ pattern: 'practicum.yandex.ru', notes: 'n', hide: 'Оценить', risk: 'ask', safe: '', next: '' }];
   it('дописывает в существующую заметку без дублей', () => {
     const once = addHideRule(base, 'Practicum.Yandex.ru', 'Мои курсы');
     expect(once[0]!.hide).toBe('Оценить\nМои курсы');
@@ -82,10 +82,26 @@ describe('addHideRule — запись в заметку сайта', () => {
     expect(base[0]!.hide).toBe('Оценить'); // исходный массив не меняется
   });
   it('создаёт заметку для нового сайта', () => {
-    expect(addHideRule(base, 'hh.ru', 'css: .chat')[1]).toEqual({ pattern: 'hh.ru', notes: '', hide: 'css: .chat', risk: 'ask', safe: '' });
+    expect(addHideRule(base, 'hh.ru', 'css: .chat')[1]).toEqual({ pattern: 'hh.ru', notes: '', hide: 'css: .chat', risk: 'ask', safe: '', next: '' });
   });
   it('шаблон из адреса', () => {
     expect(sitePatternFor('https://www.practicum.yandex.ru/learn/x')).toBe('practicum.yandex.ru');
     expect(sitePatternFor('chrome://newtab')).toBe('newtab');
+  });
+});
+
+describe('кнопка «Далее»', () => {
+  it('для неё предлагается селектор, даже если у кнопки есть текст', () => {
+    document.body.innerHTML = '<button class="lesson-footer__next">🔬🧪</button><button class="other">Ок</button>';
+    const el = document.querySelector('button')!;
+    expect(suggestHideRule(el, '🔬🧪')).toEqual({ rule: '🔬🧪', matches: 1 });
+    expect(suggestHideRule(el, '🔬🧪', true)).toEqual({ rule: 'css: button.lesson-footer__next', matches: 1 });
+  });
+
+  it('addHideRule пишет в поле next, не трогая hide', () => {
+    const base: SiteNote[] = [{ pattern: 'practicum.yandex.ru', notes: '', hide: 'Оценить', risk: 'ask', safe: '', next: '' }];
+    const r = addHideRule(base, 'practicum.yandex.ru', 'css: .next', 'next')[0]!;
+    expect([r.hide, r.next]).toEqual(['Оценить', 'css: .next']);
+    expect(addHideRule([], 'x.ru', 'css: .n', 'next')[0]).toMatchObject({ hide: '', next: 'css: .n' });
   });
 });

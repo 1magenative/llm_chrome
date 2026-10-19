@@ -12,6 +12,8 @@ export interface ElementStyle {
   display: string;
   cursor: string;
   overflowY: string;
+  /** fixed/sticky — элемент приклеен к экрану (панели, плавающие кнопки), а не часть содержимого. */
+  position?: string;
 }
 
 export interface ScrollBox {
@@ -49,7 +51,7 @@ export function browserGeometry(win: Window): Geometry {
   return {
     style(el) {
       const cs = computed(el);
-      return { display: cs?.display ?? 'block', cursor: cs?.cursor ?? 'auto', overflowY: cs?.overflowY ?? 'visible' };
+      return { display: cs?.display ?? 'block', cursor: cs?.cursor ?? 'auto', overflowY: cs?.overflowY ?? 'visible', position: cs?.position ?? 'static' };
     },
     isVisible(el) {
       if (typeof el.checkVisibility === 'function') {

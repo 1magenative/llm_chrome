@@ -103,7 +103,7 @@ export default defineContentScript({
       overlay.show(registry.filter((e) => visible.has(e.index)).map((e) => ({ index: e.index, rect: () => topRect(e, geom) })));
     };
 
-    const observe = (maxChars: number, hide: string[], indexBase: number, frame?: FrameGeometry): RawFrameObservation => {
+    const observe = (maxChars: number, hide: string[], next: string[], indexBase: number, frame?: FrameGeometry): RawFrameObservation => {
       const snapshotId = nextSnapshotId++;
       // Фрейм того же origin уже обошёл родитель через contentDocument.
       if (sameOriginWithParent()) {
@@ -122,6 +122,7 @@ export default defineContentScript({
         ignore: isOwn,
         maxTextChars: maxChars,
         hideNames: hide,
+        nextNames: next,
         indexBase,
         frame,
       });
@@ -182,7 +183,7 @@ export default defineContentScript({
      * Пользователь кликает элемент, который надо скрыть от модели. Правило строится для того
      * элемента, который видит модель (кнопка, а не иконка внутри неё).
      */
-    const pickHideRule = async (maxChars: number, hide: string[]): Promise<HidePick | null> => {
+    const pickHideRule = async (maxChars: number, hide: string[], preferSelector: boolean): Promise<HidePick | null> => {
       const el = await picker.pick((target) => () => topRect({ index: 0, element: target, target, frames: framesOf(target) }, geom));
       if (!el) return null;
       const trace = new Map<Element, TraceVerdict>();
@@ -201,7 +202,7 @@ export default defineContentScript({
           break;
         }
       }
-      const suggestion = suggestHideRule(target, accessibleName(target, geom));
+      const suggestion = suggestHideRule(target, accessibleName(target, geom), preferSelector);
       return { element: describeElement(target), rule: suggestion.rule, matches: suggestion.matches, alreadyHidden, url: location.href };
     };
 
@@ -218,7 +219,7 @@ export default defineContentScript({
           return { ok: true, value: frame?.isConnected ? geom.frameContentBox(frame) : null };
         }
         case 'content:observe':
-          return { ok: true, value: observe(msg.maxChars, msg.hide, msg.indexBase, msg.frame) };
+          return { ok: true, value: observe(msg.maxChars, msg.hide, msg.next ?? [], msg.indexBase, msg.frame) };
         case 'content:show': {
           const snap = snapshots.get(msg.snapshotId);
           if (snap) registry = snap.registry;
@@ -249,7 +250,7 @@ export default defineContentScript({
         case 'content:pick':
           return { ok: true, value: await pickAndDiagnose(msg.maxChars, msg.hide) };
         case 'content:pick-rule':
-          return { ok: true, value: await pickHideRule(msg.maxChars, msg.hide) };
+          return { ok: true, value: await pickHideRule(msg.maxChars, msg.hide, msg.preferSelector ?? false) };
         case 'content:pick-cancel':
           picker.cancel();
           return { ok: true, value: null };

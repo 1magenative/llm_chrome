@@ -24,6 +24,9 @@ const MAX_TITLE = 150;
 const MAX_OPTIONS = 8;
 const MAX_OPTION_TEXT = 30;
 
+/** Пометка кнопки «Далее», заданной пользователем в заметке сайта. */
+export const NEXT_MARK = '← NEXT (moves on to the next lesson/page)';
+
 export const SECTION_TITLES = {
   above: 'Interactive elements ABOVE the viewport (scroll up to see):',
   visible: 'Interactive elements in the viewport:',
@@ -79,6 +82,7 @@ export function serializeElement(e: ElementInfo, maxText = DEFAULT_MAX_TEXT): st
   }
 
   parts.push(...e.states);
+  if (e.next) parts.push(NEXT_MARK);
   return parts.join(' ');
 }
 

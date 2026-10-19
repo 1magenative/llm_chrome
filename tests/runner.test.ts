@@ -118,7 +118,7 @@ describe('AgentRunner', () => {
 
   it('заметки для сайта попадают в промпт по URL страницы', async () => {
     const h = harness([reply([{ action: 'done', result: 'ok' }])]);
-    await new AgentRunner({ ...cfg, siteNotes: [{ pattern: 'shop.example', notes: '«Купить» = положить в корзину', hide: '', risk: 'ask', safe: '' }] }, h.deps).run();
+    await new AgentRunner({ ...cfg, siteNotes: [{ pattern: 'shop.example', notes: '«Купить» = положить в корзину', hide: '', risk: 'ask', safe: '', next: '' }] }, h.deps).run();
     const prompt = vi.mocked(h.deps.chat).mock.calls[0]![0].at(-1)!.content;
     expect(prompt).toContain('«Купить» = положить в корзину\n\nReply with the JSON object');
     const detail = vi.mocked(h.deps.persistStep).mock.calls[0]![2];
@@ -381,7 +381,7 @@ describe('AgentRunner', () => {
     });
 
     it('запрет на сайте: действие не выполняется, модель узнаёт об этом', async () => {
-      const siteNotes = [{ pattern: 'shop.example', notes: '', hide: '', risk: 'block' as const, safe: '' }];
+      const siteNotes = [{ pattern: 'shop.example', notes: '', hide: '', risk: 'block' as const, safe: '', next: '' }];
       const h = harness(payAndDone(), { pages: payPage });
       const state = await new AgentRunner({ ...cfg, siteNotes }, h.deps).run();
       expect(h.executed).toHaveLength(1); // только ввод комментария
@@ -391,7 +391,7 @@ describe('AgentRunner', () => {
     });
 
     it('разрешение на сайте: выполняется без подтверждения', async () => {
-      const siteNotes = [{ pattern: 'shop.example', notes: '', hide: '', risk: 'allow' as const, safe: '' }];
+      const siteNotes = [{ pattern: 'shop.example', notes: '', hide: '', risk: 'allow' as const, safe: '', next: '' }];
       const h = harness(payAndDone(), { pages: payPage });
       const state = await new AgentRunner({ ...cfg, siteNotes }, h.deps).run();
       expect(state.status).toBe('done');

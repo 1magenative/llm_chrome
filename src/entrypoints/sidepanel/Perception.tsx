@@ -28,7 +28,9 @@ export function Perception({ defaultHighlight, maxChars, siteNotes }: Props) {
   const [picking, setPicking] = useState(false);
   const [diagnosis, setDiagnosis] = useState<Diagnosis | null>(null);
   const [hiding, setHiding] = useState(false);
-  const [hidePick, setHidePick] = useState<(HidePick & { pattern: string }) | null>(null);
+  /** Что выбираем мышью: элемент, который надо скрыть, или кнопку «Далее». */
+  const [pickMode, setPickMode] = useState<'hide' | 'next'>('hide');
+  const [hidePick, setHidePick] = useState<(HidePick & { pattern: string; mode: 'hide' | 'next' }) | null>(null);
   const [hideSaved, setHideSaved] = useState('');
 
   const observe = async (withHighlight = highlight) => {
@@ -78,7 +80,8 @@ export function Perception({ defaultHighlight, maxChars, siteNotes }: Props) {
   };
 
   /** «Скрыть от модели»: кликнуть элемент → предложенное правило → в заметку для сайта. */
-  const pickToHide = async () => {
+  const pickToHide = async (mode: 'hide' | 'next' = 'hide') => {
+    setPickMode(mode);
     setError('');
     setHideSaved('');
     setHidePick(null);
@@ -91,8 +94,8 @@ export function Perception({ defaultHighlight, maxChars, siteNotes }: Props) {
       }
       setHiding(true);
       const hide = tab.url ? hiddenNamesFor(tab.url, siteNotes) : [];
-      const picked = await sendToContent(tab.id, { type: 'content:pick-rule', maxChars, hide });
-      if (picked) setHidePick({ ...picked, pattern: sitePatternFor(picked.url) });
+      const picked = await sendToContent(tab.id, { type: 'content:pick-rule', maxChars, hide, preferSelector: mode === 'next' });
+      if (picked) setHidePick({ ...picked, pattern: sitePatternFor(picked.url), mode });
     } catch (err) {
       setError(errorMessage(err));
     } finally {
@@ -103,8 +106,12 @@ export function Perception({ defaultHighlight, maxChars, siteNotes }: Props) {
   const saveHideRule = async () => {
     if (!hidePick) return;
     const settings = await loadSettings();
-    await saveSettings({ ...settings, siteNotes: addHideRule(settings.siteNotes, hidePick.pattern, hidePick.rule) });
-    setHideSaved(`Добавлено в заметку для ${hidePick.pattern}. Можно выбрать следующий элемент.`);
+    await saveSettings({ ...settings, siteNotes: addHideRule(settings.siteNotes, hidePick.pattern, hidePick.rule, hidePick.mode) });
+    setHideSaved(
+      hidePick.mode === 'next'
+        ? `Готово: на ${hidePick.pattern} модель увидит эту кнопку с пометкой ← NEXT.`
+        : `Добавлено в заметку для ${hidePick.pattern}. Можно выбрать следующий элемент.`,
+    );
     setHidePick(null);
     if (result) void observe();
   };
@@ -125,8 +132,14 @@ export function Perception({ defaultHighlight, maxChars, siteNotes }: Props) {
         <button onClick={() => void pick()} title="Кликните элемент на странице — расширение объяснит, видит ли его модель">
           {picking ? 'Отменить выбор' : 'Почему не виден?'}
         </button>
-        <button onClick={() => void pickToHide()} title="Кликните элемент на странице — модель перестанет его видеть на этом сайте">
-          {hiding ? 'Отменить выбор' : 'Скрыть элемент…'}
+        <button onClick={() => void pickToHide('hide')} title="Кликните элемент на странице — модель перестанет его видеть на этом сайте">
+          {hiding && pickMode === 'hide' ? 'Отменить выбор' : 'Скрыть элемент…'}
+        </button>
+        <button
+          onClick={() => void pickToHide('next')}
+          title="Кликните кнопку перехода к следующему уроку/странице — модель увидит её с пометкой NEXT, даже если на ней одни эмодзи"
+        >
+          {hiding && pickMode === 'next' ? 'Отменить выбор' : 'Это кнопка «Далее»…'}
         </button>
         {result && (
           <button onClick={() => void copy()} title="Скопировать текст наблюдения">
@@ -146,12 +159,12 @@ export function Perception({ defaultHighlight, maxChars, siteNotes }: Props) {
           <div class="mono">{hidePick.element}</div>
           {hidePick.alreadyHidden && <div class="ok">Этот элемент уже скрыт от модели.</div>}
           <label class="field">
-            <span>Правило «Скрыть от модели» (текст кнопки или css: селектор)</span>
+            <span>{hidePick.mode === 'next' ? 'Правило кнопки «Далее» (css: селектор — текст на ней меняется)' : 'Правило «Скрыть от модели» (текст кнопки или css: селектор)'}</span>
             <input class="mono" value={hidePick.rule} spellcheck={false} onInput={(e) => setHidePick({ ...hidePick, rule: e.currentTarget.value })} />
           </label>
           <div class={hidePick.matches > 1 ? 'warn' : 'muted'}>
             Под правило попадает элементов на странице: {hidePick.matches}
-            {hidePick.matches > 1 ? ' — все они будут скрыты' : ''}
+            {hidePick.matches > 1 ? (hidePick.mode === 'next' ? ' — все получат пометку NEXT' : ' — все они будут скрыты') : ''}
           </div>
           <label class="field">
             <span>Для сайта</span>
@@ -159,7 +172,7 @@ export function Perception({ defaultHighlight, maxChars, siteNotes }: Props) {
           </label>
           <div class="row">
             <button class="primary" disabled={!hidePick.rule.trim() || !hidePick.pattern.trim()} onClick={() => void saveHideRule()}>
-              Скрыть
+              {hidePick.mode === 'next' ? 'Отметить как «Далее»' : 'Скрыть'}
             </button>
             <button onClick={() => setHidePick(null)}>Отмена</button>
           </div>

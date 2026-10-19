@@ -275,6 +275,7 @@ export function sanitizeSettings(raw: unknown, defaults: Settings = DEFAULT_SETT
             hide: str(n.hide, '').slice(0, MAX_NOTE_CHARS),
             risk: RISK_MODES.includes(n.risk as SiteRiskMode) ? (n.risk as SiteRiskMode) : 'ask',
             safe: str(n.safe, '').slice(0, MAX_NOTE_CHARS),
+            next: str(n.next, '').slice(0, MAX_NOTE_CHARS),
           }))
           .slice(0, MAX_SITE_NOTES)
       : defaults.siteNotes,

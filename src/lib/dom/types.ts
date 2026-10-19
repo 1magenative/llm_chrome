@@ -50,6 +50,10 @@ export interface ElementInfo {
   inFrame?: boolean;
   inShadow?: boolean;
   flags?: ElementFlag[];
+  /** Пользователь отметил это кнопкой «Далее» для сайта — модель увидит пометку. */
+  next?: boolean;
+  /** Внутри fixed/sticky-блока: панель интерфейса, а не содержимое страницы. */
+  pinned?: boolean;
 }
 
 export interface ScrollInfo {

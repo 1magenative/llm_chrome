@@ -30,6 +30,26 @@ export interface ObservationHandle {
   nodes: FrameNode[];
   /** Признаки элементов для оценки риска (номер → флаги). */
   flags?: Record<number, ElementFlag[]>;
+  /** Сводка элементов для режима пролистывания: где на странице, можно ли нажать. */
+  elements?: ElementBrief[];
+}
+
+/** Элемент страницы без подробностей — для пролистывания курса без модели. */
+export interface ElementBrief {
+  index: number;
+  /** Строка как в наблюдении, без номера: `button "Проверить" disabled`. */
+  line: string;
+  /** Верх элемента от начала страницы, px. */
+  y: number;
+  disabled: boolean;
+  /** Отмечен пользователем как кнопка «Далее». */
+  next: boolean;
+  /** Кнопка/ссылка/переключатель — то, что жмут; поля ввода и редакторы — нет. */
+  clickable: boolean;
+  /** Приклеен к экрану (боковая панель, плавающая кнопка чата) — не содержимое урока. */
+  pinned?: boolean;
+  /** Внутри iframe (тренажёр, виджет). */
+  inFrame?: boolean;
 }
 
 export interface ActionResult {

@@ -130,10 +130,11 @@ export interface HideRuleSuggestion {
  * Правило для выбранного элемента: текст, если у элемента есть короткое имя, иначе CSS-селектор,
  * который находит этот элемент и как можно меньше других.
  */
-export function suggestHideRule(el: Element, name: string): HideRuleSuggestion {
+export function suggestHideRule(el: Element, name: string, preferSelector = false): HideRuleSuggestion {
   const doc = el.ownerDocument;
   const clean = name.replace(/\s+/g, ' ').trim();
-  if (clean && clean.length <= 60) {
+  // Для кнопки «Далее» текст меняется от урока к уроку («Уф, это всё?», эмодзи) — нужен селектор.
+  if (clean && clean.length <= 60 && !preferSelector) {
     const rules = parseHideRules([clean]);
     const all = Array.from(doc.querySelectorAll('a, button, [role], input, select, textarea, summary'));
     const matches = all.filter((e) => isHiddenByRules(e, (e.textContent ?? '').replace(/\s+/g, ' ').trim(), rules)).length;

@@ -126,7 +126,7 @@ describe('assessAction', () => {
 });
 
 describe('sitePolicyFor', () => {
-  const note = (pattern: string, risk: SiteNote['risk'], safe = ''): SiteNote => ({ pattern, notes: '', hide: '', risk, safe });
+  const note = (pattern: string, risk: SiteNote['risk'], safe = ''): SiteNote => ({ pattern, notes: '', hide: '', risk, safe, next: '' });
   it('запрет сильнее разрешения, исключения складываются', () => {
     const notes = [note('yandex.ru', 'allow', 'Отправить'), note('practicum.yandex.ru', 'ask', 'Проверить\n'), note('bank.example', 'block')];
     expect(sitePolicyFor('https://practicum.yandex.ru/learn', notes)).toEqual({ mode: 'allow', safe: ['отправить', 'проверить'] });

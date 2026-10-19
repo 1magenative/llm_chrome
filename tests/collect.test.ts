@@ -41,6 +41,7 @@ function fakeGeometry(viewport = { width: 1000, height: 800 }, scrollY = 0, scro
       display: ownStyle(el).display || (INLINE_TAGS.has(el.localName) ? 'inline' : 'block'),
       cursor: cursorOf(el),
       overflowY: (el as HTMLElement).style?.overflowY || 'visible',
+      position: (el as HTMLElement).style?.position || 'static',
     }),
     // data-scroll="scrollTop scrollHeight clientHeight clientWidth"
     scrollBox(el) {
@@ -657,6 +658,27 @@ describe('collectSnapshot: «Скрыть от модели»', () => {
   });
 });
 
+describe('collectSnapshot: кнопка «Далее» из заметки сайта', () => {
+  it('помечается NEXT в списке, даже если на ней одни эмодзи; остальное не трогается', () => {
+    const text = line(
+      `<h1 data-rect="0 0 600 40">Playground</h1>
+       <button class="lesson-next" data-rect="200 300 300 80">🔬🧪</button>
+       <button class="chat" data-rect="900 700 60 60"><svg></svg></button>`,
+      { nextNames: ['css: button.lesson-next'] },
+    );
+    expect(text).toContain('[1] button "🔬🧪" ← NEXT (moves on to the next lesson/page)');
+    expect(text).not.toMatch(/\[2\][^\n]*NEXT/);
+  });
+
+  it('и по тексту, и вместе со «скрыть»', () => {
+    const { snapshot } = collect(
+      `<button data-rect="0 0 100 20">Уф, надеюсь, это всё?</button><button data-rect="0 40 100 20">Оценить</button>`,
+      { nextNames: ['надеюсь, это всё'], hideNames: ['Оценить'] },
+    );
+    expect(snapshot.elements.map((e) => [e.name, !!e.next])).toEqual([['Уф, надеюсь, это всё?', true]]);
+  });
+});
+
 describe('collectSnapshot: сбор внутри iframe с другого сайта', () => {
   it('координаты и зоны — в системе верхней страницы, номера продолжают верхние', () => {
     const { snapshot, registry } = collect(
@@ -711,6 +733,23 @@ describe('collectSnapshot: редакторы кода', () => {
     `);
     expect(snapshot.elements.map((e) => e.tag)).toEqual(['code-editor']);
     expect(snapshot.text).toContain('let a = 1;');
+  });
+});
+
+describe('collectSnapshot: приклеенные панели', () => {
+  it('fixed/sticky-панели и окна помечаются pinned, обёртка на весь экран — нет', () => {
+    const { snapshot } = collect(`
+      <div style="position:fixed" data-rect="0 0 1000 800">
+        <main><button data-rect="300 400 200 40">Расскажи анекдот</button></main>
+        <nav style="position:fixed" data-rect="0 0 60 800"><button aria-label="Курсы" data-rect="10 700 40 40">x</button></nav>
+      </div>
+      <aside style="position:sticky" data-rect="900 700 100 100"><a href="/chat" data-rect="910 720 80 30">Чат</a></aside>
+      <div role="dialog"><button data-rect="500 100 100 30">Закрыть</button></div>`);
+    const by = (name: string) => snapshot.elements.find((e) => e.name === name);
+    expect(by('Расскажи анекдот')?.pinned).toBeFalsy();
+    expect(by('Курсы')?.pinned).toBe(true);
+    expect(by('Чат')?.pinned).toBe(true);
+    expect(by('Закрыть')?.pinned).toBe(true);
   });
 });
 

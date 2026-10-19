@@ -24,6 +24,8 @@ export interface CollectOptions {
   trace?: Map<Element, TraceVerdict>;
   /** «Скрыть от модели» из заметки для сайта: строки-правила (текст или `css: селектор`, см. hide-rules.ts). */
   hideNames?: readonly string[];
+  /** Правила кнопки «Далее» из заметки сайта (текст или `css:`): такие элементы получают пометку next. */
+  nextNames?: readonly string[];
   /**
    * Сбор внутри iframe с другого сайта: где этот документ лежит в верхней странице.
    * offset — сдвиг вьюпорта фрейма, clip — его видимая область, viewport — размер вьюпорта
@@ -141,6 +143,8 @@ interface WalkCtx {
   clickableAncestor: ClickableAncestor;
   parentCursor: string;
   inShadow: boolean;
+  /** Предок приклеен к экрану (position: fixed/sticky). */
+  pinned?: boolean;
 }
 
 export function intersect(a: Rect, b: Rect): Rect | null {
@@ -543,6 +547,7 @@ export function collectSnapshot(doc: Document, geom: Geometry, opts: CollectOpti
   let scroller: { el: Element; area: number } | null = null;
   const stats: CollectStats = { nodesVisited: 0, walkTruncated: false, covered: 0, offscreen: 0, hidden: 0, userHidden: 0 };
   const hideRules = parseHideRules(opts.hideNames ?? []);
+  const nextRules = parseHideRules(opts.nextNames ?? []);
   const hiding = hasRules(hideRules);
   const hiddenCache = new Map<Element, boolean>();
   /**
@@ -641,7 +646,11 @@ export function collectSnapshot(doc: Document, geom: Geometry, opts: CollectOpti
     const described = detected.editor ? describeEditor(el) : describe(subject, geom);
     const index = elements.length + 1;
     const info: ElementInfo = { ...described, index, zone: place.zone, distance: Math.round(place.distance), rect };
+    if (hasRules(nextRules) && (isHiddenByRules(el, described.name, nextRules) || (subject !== el && isHiddenByRules(subject, described.name, nextRules)))) {
+      info.next = true;
+    }
     if (ctx.frames.length > 0 || opts.frame) info.inFrame = true;
+    if (ctx.pinned) info.pinned = true;
     if (ctx.inShadow) info.inShadow = true;
     elements.push(info);
     registry.push({ index, element: subject, target, frames: ctx.frames });
@@ -723,6 +732,18 @@ export function collectSnapshot(doc: Document, geom: Geometry, opts: CollectOpti
     }
   };
 
+  /**
+   * Панель, приклеенная к экрану (боковое меню, кнопка чата), или окно поверх страницы.
+   * Обёртка на весь экран (fixed-раскладка приложения, затемнение под окном) — не панель:
+   * иначе всё содержимое страницы оказалось бы «приклеенным».
+   */
+  const isPinnedBox = (el: Element, position: string | undefined): boolean => {
+    if (el.localName === 'dialog' || el.getAttribute('aria-modal') === 'true' || el.getAttribute('role') === 'dialog' || el.getAttribute('role') === 'alertdialog') return true;
+    if (position !== 'fixed' && position !== 'sticky') return false;
+    const r = geom.rect(el);
+    return !(r.width >= vp.width * 0.9 && r.height >= vp.height * 0.9);
+  };
+
   const visit = (el: Element, ctx: WalkCtx): void => {
     stats.nodesVisited++;
     const tag = el.localName;
@@ -761,7 +782,8 @@ export function collectSnapshot(doc: Document, geom: Geometry, opts: CollectOpti
       trace?.set(el, { kind: 'skipped', reason: 'user-hidden' });
       return;
     }
-    if (detected && !addCandidate(el, detected, ctx)) detected = null;
+    const pinnedHere = !!ctx.pinned || isPinnedBox(el, style.position);
+    if (detected && !addCandidate(el, detected, pinnedHere ? { ...ctx, pinned: true } : ctx)) detected = null;
     if (!detected && trace && !trace.has(el)) {
       trace.set(el, { kind: 'not-interactive', cursor: style.cursor, parentCursor: ctx.parentCursor, clickableAncestor: ctx.clickableAncestor });
     }
@@ -798,6 +820,7 @@ export function collectSnapshot(doc: Document, geom: Geometry, opts: CollectOpti
             ? 'heuristic'
             : 'none',
       parentCursor: style.cursor,
+      pinned: pinnedHere,
     };
 
     const shadow = el.shadowRoot;

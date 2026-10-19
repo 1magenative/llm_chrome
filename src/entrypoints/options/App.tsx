@@ -370,6 +370,10 @@ export function App() {
                 </select>
               </label>
               <label class="field">
+                <span>Кнопка «Далее» — css: селектор или текст (модель увидит её с пометкой ← NEXT). Проще отметить кнопкой «Это кнопка „Далее“…» в панели</span>
+                <textarea rows={2} class="mono" value={note.next} placeholder="css: button.lesson-next" onInput={(e) => setNote(i, 'next', e.currentTarget.value)} />
+              </label>
+              <label class="field">
                 <span>Не спрашивать подтверждения для — тексты кнопок, по одному на строку (пароли всё равно спрашиваются)</span>
                 <textarea rows={2} value={note.safe} placeholder="Отправить ответ" onInput={(e) => setNote(i, 'safe', e.currentTarget.value)} />
               </label>
@@ -377,7 +381,7 @@ export function App() {
           </div>
         ))}
         <div class="row">
-          <button onClick={() => update((s) => ({ ...s, siteNotes: [...s.siteNotes, { pattern: '', notes: '', hide: '', risk: 'ask', safe: '' }] }))}>Добавить сайт</button>
+          <button onClick={() => update((s) => ({ ...s, siteNotes: [...s.siteNotes, { pattern: '', notes: '', hide: '', risk: 'ask', safe: '', next: '' }] }))}>Добавить сайт</button>
         </div>
       </section>
 
