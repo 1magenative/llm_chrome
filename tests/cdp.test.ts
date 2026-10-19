@@ -69,3 +69,36 @@ describe('CdpDriver', () => {
     expect(calls[2]!.params).toMatchObject({ text: '\r', key: 'Enter' });
   });
 });
+
+describe('CdpDriver.typeChars — ввод по буквам', () => {
+  it('на каждый символ keyDown с текстом и keyUp; латиница с кодом клавиши, кириллица — только key', async () => {
+    const { driver, calls } = fakeDriver();
+    await driver.typeChars('a1 ж', 0);
+    const keys = calls.map((c) => [c.params?.type, c.params?.key, c.params?.code ?? '', c.params?.text ?? '']);
+    expect(keys).toEqual([
+      ['keyDown', 'a', 'KeyA', 'a'],
+      ['keyUp', 'a', 'KeyA', ''],
+      ['keyDown', '1', 'Digit1', '1'],
+      ['keyUp', '1', 'Digit1', ''],
+      ['keyDown', ' ', 'Space', ' '],
+      ['keyUp', ' ', 'Space', ''],
+      ['keyDown', 'ж', '', 'ж'],
+      ['keyUp', 'ж', '', ''],
+    ]);
+  });
+
+  it('перевод строки — Enter, табуляция — вставкой, пауза между буквами', async () => {
+    const pauses: number[] = [];
+    const calls: { method: string; params?: Record<string, unknown> }[] = [];
+    const driver = new CdpDriver(async (method, params) => void calls.push({ method, params }), {
+      sleep: async (ms) => void pauses.push(ms),
+      random: () => 0.5,
+      platform: 'other',
+      zoom: 1,
+    });
+    await driver.typeChars('x\n\ty', 25);
+    expect(calls.some((c) => c.params?.key === 'Enter')).toBe(true);
+    expect(calls.find((c) => c.method === 'Input.insertText')?.params).toEqual({ text: '\t' });
+    expect(pauses).toEqual([25, 25, 25, 25]);
+  });
+});

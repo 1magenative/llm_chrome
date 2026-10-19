@@ -261,6 +261,7 @@ export function App() {
             max={200}
             onChange={(v) => setAgent('skipAgentSteps', v)}
           />
+          <NumberField label="Пауза между буквами при вводе по буквам, мс" value={settings.agent.typeDelayMs} min={0} max={1000} onChange={(v) => setAgent('typeDelayMs', v)} />
           <NumberField
             label="Лимит наблюдения, символов"
             value={settings.agent.maxObservationChars}
@@ -284,6 +285,12 @@ export function App() {
           />
           <CheckField label="Клики через chrome.debugger (CDP)" checked={settings.agent.useDebugger} onChange={(v) => setAgent('useDebugger', v)} />
           <CheckField label="Визуальный курсор" checked={settings.agent.showCursor} onChange={(v) => setAgent('showCursor', v)} />
+          <CheckField
+            label="Вводить текст по буквам"
+            hint="Каждый символ — отдельное нажатие клавиши (keydown/input/keyup), а не вставка строки. Нужно полям с подсказками, масками и проверкой на каждую букву. Только с CDP; в редакторы кода текст всё равно вставляется целиком"
+            checked={settings.agent.typeByKeys}
+            onChange={(v) => setAgent('typeByKeys', v)}
+          />
           <CheckField label="Debug-подсветка элементов" checked={settings.agent.debugOverlay} onChange={(v) => setAgent('debugOverlay', v)} />
         </div>
       </section>

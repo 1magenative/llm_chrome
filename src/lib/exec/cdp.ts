@@ -16,6 +16,20 @@ export interface CdpDriverOptions {
   zoom: number;
 }
 
+/** Описание клавиши для символа: латиница и цифры — с кодом клавиши, остальное (кириллица, знаки) — только key. */
+export function keyFor(ch: string): { key: string; code?: string; windowsVirtualKeyCode?: number; nativeVirtualKeyCode?: number } {
+  if (/^[a-z]$/i.test(ch)) {
+    const vk = ch.toUpperCase().charCodeAt(0);
+    return { key: ch, code: `Key${ch.toUpperCase()}`, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk };
+  }
+  if (/^[0-9]$/.test(ch)) {
+    const vk = ch.charCodeAt(0);
+    return { key: ch, code: `Digit${ch}`, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk };
+  }
+  if (ch === ' ') return { key: ' ', code: 'Space', windowsVirtualKeyCode: 32, nativeVirtualKeyCode: 32 };
+  return { key: ch };
+}
+
 const MODIFIER_CTRL = 2;
 const MODIFIER_META = 4;
 
@@ -90,6 +104,25 @@ export class CdpDriver {
   /** Вставка текста в сфокусированное поле — как ввод с клавиатуры (beforeinput/input). */
   async insertText(text: string): Promise<void> {
     await this.send('Input.insertText', { text });
+  }
+
+  /**
+   * Ввод по одному символу: keyDown с текстом (браузер сам вставит символ) и keyUp — у страницы
+   * на каждую букву срабатывают keydown → keypress → beforeinput/input → keyup, как с клавиатуры.
+   * Перевод строки — Enter, табуляция — вставкой (Tab увёл бы фокус).
+   */
+  async typeChars(text: string, delayMs: number): Promise<void> {
+    for (const ch of text) {
+      if (ch === '\n') await this.pressEnter();
+      else if (ch === '\r') continue;
+      else if (ch === '\t') await this.insertText(ch);
+      else {
+        const key = keyFor(ch);
+        await this.send('Input.dispatchKeyEvent', { type: 'keyDown', ...key, text: ch, unmodifiedText: ch });
+        await this.send('Input.dispatchKeyEvent', { type: 'keyUp', ...key });
+      }
+      if (delayMs > 0) await this.opts.sleep(delayMs);
+    }
   }
 
   /** Cmd/Ctrl+A с командой редактора selectAll — работает и в редакторах кода. */

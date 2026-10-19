@@ -141,6 +141,7 @@ async function launch(settings: Settings, profileId: ProfileId, cfg: RunConfig, 
     cdp: debuggers ? (tabId) => debuggers.driverFor(tabId) : undefined,
     cdpUnavailable: () => debuggers?.unavailableReason ?? '',
     showCursor: settings.agent.showCursor,
+    typing: { byKeys: settings.agent.typeByKeys, delayMs: settings.agent.typeDelayMs },
   };
 
   const { systemTemplate: _sys, ...cfgToSave } = cfg;
@@ -238,6 +239,7 @@ async function startSkip(windowId: number): Promise<void> {
       cdp: debuggers ? (tabId) => debuggers.driverFor(tabId) : undefined,
       cdpUnavailable: () => debuggers?.unavailableReason ?? '',
       showCursor: s.agent.showCursor,
+      typing: { byKeys: s.agent.typeByKeys, delayMs: s.agent.typeDelayMs },
     };
     const skipper = new Skipper({
       observe: async () => {

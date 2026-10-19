@@ -55,6 +55,10 @@ export interface AgentSettings {
   useDebugger: boolean;
   showCursor: boolean;
   debugOverlay: boolean;
+  /** Ввод по одной букве (события клавиатуры на каждый символ) вместо вставки строки целиком. Только с CDP. */
+  typeByKeys: boolean;
+  /** Пауза между символами при вводе по буквам, мс. */
+  typeDelayMs: number;
   /** «Пролистать курс»: застряв, звать нейросеть, а когда она разберётся — листать дальше самому. */
   skipWithAgent: boolean;
   /** Сколько шагов даётся нейросети на одну заминку при пролистывании. */
@@ -138,6 +142,8 @@ export const DEFAULT_SETTINGS: Settings = {
     loopThreshold: 3,
     autoScrollAfter: 2,
     skipWithAgent: true,
+    typeByKeys: false,
+    typeDelayMs: 30,
     skipAgentSteps: 25,
     approveEachStep: false,
     maxObservationChars: 12000,
@@ -236,6 +242,8 @@ function sanitizeAgent(raw: unknown, def: AgentSettings): AgentSettings {
     showCursor: bool(r.showCursor, def.showCursor),
     debugOverlay: bool(r.debugOverlay, def.debugOverlay),
     skipWithAgent: bool(r.skipWithAgent, def.skipWithAgent),
+    typeByKeys: bool(r.typeByKeys, def.typeByKeys),
+    typeDelayMs: num(r.typeDelayMs, def.typeDelayMs, 0, 1000, true),
     skipAgentSteps: num(r.skipAgentSteps, def.skipAgentSteps, 3, 200, true),
   };
 }

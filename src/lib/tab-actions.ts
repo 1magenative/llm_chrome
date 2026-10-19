@@ -51,6 +51,8 @@ export interface ExecContext {
   /** Почему CDP недоступен — добавляется к результату, чтобы было видно в ленте. */
   cdpUnavailable?: () => string;
   showCursor: boolean;
+  /** Ввод по буквам (только с CDP); не задано — вставка строки целиком. */
+  typing?: { byKeys: boolean; delayMs: number };
 }
 
 /**
@@ -240,8 +242,11 @@ async function cdpType(
   await Promise.all([animateCursor(ctx, p), driver.click(p)]);
   await sendToContent(ctx.tab.tabId, { type: 'content:focus-select', snapshotId: where.snapshotId, index: action.index }, where.frameId);
   await driver.selectAll();
-  if (action.text) await driver.insertText(action.text);
-  else await driver.pressBackspace();
+  // Редактор кода сам закрывает скобки и ставит отступы — по буквам туда вводить нельзя, только вставкой.
+  const editor = handle.elements?.find((e) => e.index === action.index)?.line.startsWith('code-editor') ?? false;
+  if (!action.text) await driver.pressBackspace();
+  else if (ctx.typing?.byKeys && !editor) await driver.typeChars(action.text, ctx.typing.delayMs);
+  else await driver.insertText(action.text);
   if (action.submit) {
     await driver.pressEnter();
     return { ok: true, message: 'typed and pressed Enter' };
