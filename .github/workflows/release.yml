@@ -1,0 +1,38 @@
+# Релиз: при пуше тега v* собирает расширение, гоняет тесты и прикладывает zip к релизу на GitHub.
+#   git tag v0.1.0 && git push origin v0.1.0
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+      - run: npm run compile
+      - run: npm test
+      - run: npx wxt zip
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*-chrome.zip
+          generate_release_notes: true
+          body: |
+            Готовая сборка расширения. Установка без Node.js:
+            1. Скачайте `llm-browser-agent-*-chrome.zip` ниже и распакуйте в постоянную папку.
+            2. Откройте `chrome://extensions`, включите «Режим разработчика».
+            3. «Загрузить распакованное расширение» → выберите распакованную папку.
+
+            Настройка сервера с моделью — в [README](https://github.com/${{ github.repository }}#сервер-с-моделью).
