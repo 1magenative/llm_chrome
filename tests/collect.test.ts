@@ -753,3 +753,31 @@ describe('collectSnapshot: приклеенные панели', () => {
   });
 });
 
+
+describe('collectSnapshot: «@иконки»', () => {
+  const html = `
+    <main><button data-rect="300 400 200 40">Расскажи анекдот</button><button data-rect="300 500 40 40" aria-label="Нравится">♡</button></main>
+    <div style="position:fixed" data-rect="900 700 60 60"><button aria-label="Чат" data-rect="905 705 50 50"><svg></svg></button><button data-rect="905 650 50 40">Помощь</button></div>
+    <aside style="position:sticky" data-rect="0 0 60 800"><label data-rect="10 100 40 40" style="cursor:pointer"><input type="checkbox" hidden>◐</label></aside>`;
+  const names = (hide: string[]) => collect(html, { hideNames: hide }).snapshot.elements.map((e) => e.name ?? '');
+
+  it('без правила иконки на панелях видны', () => {
+    expect(names([])).toEqual(expect.arrayContaining(['Расскажи анекдот', 'Нравится', 'Чат', 'Помощь']));
+  });
+
+  it('с правилом прячутся иконки без подписи на приклеенных панелях; кнопки с текстом и иконки урока остаются', () => {
+    const n = names(['@иконки']);
+    expect(n).toEqual(expect.arrayContaining(['Расскажи анекдот', 'Нравится', 'Помощь']));
+    expect(n).not.toContain('Чат');
+    expect(n.length).toBe(3);
+  });
+
+  it('во фрейме (тренажёр) прячутся все иконки без подписи', () => {
+    document.body.innerHTML = '<button data-rect="10 10 40 40" aria-label="Тема">◐</button><button data-rect="10 60 100 30">Проверить</button>';
+    const { snapshot } = collectSnapshot(document, fakeGeometry(), {
+      hideNames: ['@icons'],
+      frame: { offset: { x: 0, y: 0 }, clip: { x: 0, y: 0, width: 1000, height: 800 }, viewport: { width: 1000, height: 800 } },
+    });
+    expect(snapshot.elements.map((e) => e.name)).toEqual(['Проверить']);
+  });
+});

@@ -43,7 +43,7 @@ function deps(page: FakePage): SkipDeps {
   };
 }
 
-const cfg = { bottomRepeats: 3, settleMs: 0, maxClicks: 100, maxSameClicks: 8 };
+const cfg = { bottomRepeats: 3, settleMs: 0, maxClicks: 100, maxSameClicks: 8, maxSameState: 3, maxPageClicks: 60 };
 
 describe('Skipper — пролистывание курса без модели', () => {
   it('жмёт нижнюю кнопку, пока она открывает новые блоки, и уходит на следующий урок', async () => {
@@ -139,4 +139,21 @@ describe('Skipper — пролистывание курса без модели'
     await new Skipper(deps(page), { ...cfg, maxClicks: 1 }).run();
     expect(page.clicks[0]).toBe('button "Дальше"');
   });
+
+  it('петля: кнопки гоняют страницу между одними и теми же состояниями — честно «застрял: по кругу»', async () => {
+    const page: FakePage = { url: 'https://p.example/lesson/1', els: [], clicks: [], scrolls: 0 };
+    const a = { line: 'button "Вкладка A"', y: 900 } as FakeEl;
+    const b = { line: 'button "Вкладка B"', y: 1000 } as FakeEl;
+    let open = 'A';
+    const view = () => [a, b, { line: `button "Открыта ${open}"`, y: 500, clickable: false }];
+    a.onClick = (p) => void ((open = 'A'), (p.els = view()));
+    b.onClick = (p) => void ((open = 'B'), (p.els = view()));
+    page.els = view();
+    const s = await new Skipper(deps(page), { ...cfg, maxSameState: 1 }).run();
+    expect(s.status).toBe('stuck');
+    expect(s.reason).toBe('loop');
+    expect(s.url).toBe('https://p.example/lesson/1');
+    expect(page.clicks.length).toBeLessThan(30);
+  });
 });
+

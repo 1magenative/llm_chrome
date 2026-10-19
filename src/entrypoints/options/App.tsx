@@ -15,6 +15,7 @@ import { checkConnection, probeGeneration, type ConnectionReport, type ProbeResu
 import { DEFAULT_RISK_RULES, type RiskRules, type SiteRiskMode } from '@/lib/agent/risk';
 import { PROVIDERS, PROVIDER_IDS, providerInfo, type ProviderId } from '@/lib/llm/providers';
 import { sendToBackground } from '@/lib/messages';
+import { ICONS_RULE, parseHideRules } from '@/lib/dom/hide-rules';
 import { isLocalHost, normalizeBaseUrl } from '@/lib/llm/url';
 import { CheckField, NumberField, TextField } from '@/ui/fields';
 
@@ -254,6 +255,13 @@ export function App() {
             onChange={(v) => setAgent('autoScrollAfter', v)}
           />
           <NumberField
+            label="«Пролистать курс»: шагов нейросети на одну заминку"
+            value={settings.agent.skipAgentSteps}
+            min={3}
+            max={200}
+            onChange={(v) => setAgent('skipAgentSteps', v)}
+          />
+          <NumberField
             label="Лимит наблюдения, символов"
             value={settings.agent.maxObservationChars}
             min={1000}
@@ -357,6 +365,22 @@ export function App() {
                   update((s) => ({ ...s, siteNotes: s.siteNotes.map((n, j) => (j === i ? { ...n, hide } : n)) }));
                 }}
               />
+            </label>
+            <label class="check">
+              <input
+                type="checkbox"
+                checked={!!parseHideRules(note.hide.split('\n')).icons}
+                onChange={(e) => {
+                  const on = e.currentTarget.checked;
+                  const rest = note.hide.split('\n').filter((l) => !/^@(иконки|icons)$/i.test(l.trim()));
+                  const hide = (on ? [ICONS_RULE, ...rest] : rest).join('\n').replace(/^\n+|\n+$/g, '');
+                  update((s) => ({ ...s, siteNotes: s.siteNotes.map((n, j) => (j === i ? { ...n, hide } : n)) }));
+                }}
+              />
+              <span>
+                Скрыть иконки без подписи на приклеенных панелях и в тренажёрах (чат, тема, «избранное», боковое меню) — их не увидят ни модель, ни «Пролистать курс».
+                В списке выше это строка <span class="mono">{ICONS_RULE}</span>.
+              </span>
             </label>
             <div class="grid">
               <label class="field">

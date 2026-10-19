@@ -33,9 +33,13 @@ export interface SkipConfig {
   maxClicks: number;
   /** Сколько раз можно жать одну и ту же кнопку на одной странице. */
   maxSameClicks: number;
+  /** Петля: столько раз страница вернулась в уже виденное состояние. */
+  maxSameState: number;
+  /** Петля: столько кликов на одной странице без перехода дальше. */
+  maxPageClicks: number;
 }
 
-export const DEFAULT_SKIP_CONFIG: SkipConfig = { bottomRepeats: 3, settleMs: 400, maxClicks: 1000, maxSameClicks: 8 };
+export const DEFAULT_SKIP_CONFIG: SkipConfig = { bottomRepeats: 3, settleMs: 400, maxClicks: 1000, maxSameClicks: 8, maxSameState: 3, maxPageClicks: 60 };
 
 export interface SkipState {
   status: 'running' | 'done' | 'stuck' | 'stopped' | 'failed';
@@ -43,6 +47,12 @@ export interface SkipState {
   pages: number;
   last: string;
   message?: string;
+  /** Адрес страницы, на которой остановились. */
+  url?: string;
+  /** Сколько нажатий что-то изменили на странице (курс продвинулся). */
+  progress?: number;
+  /** Почему застряли: нет кнопок / перебрали все / ходим по кругу. */
+  reason?: 'no-buttons' | 'exhausted' | 'loop';
 }
 
 /** Этого не жмём никогда, даже если внизу: сбросит код, выйдет из аккаунта и т.п. */
@@ -101,6 +111,10 @@ export class Skipper {
   private pressed = new Map<string, number>();
   private pageUrl = '';
   private startHost = '';
+  /** Сколько раз видели каждое состояние страницы — чтобы заметить петлю. */
+  private seen = new Map<string, number>();
+  private pageClicks = 0;
+  private loopHit = false;
 
   constructor(
     private readonly deps: SkipDeps,
@@ -115,9 +129,23 @@ export class Skipper {
     this.deps.onState({ ...this.state });
   }
 
-  private finish(status: SkipState['status'], message: string): void {
-    Object.assign(this.state, { status, message });
+  private finish(status: SkipState['status'], message: string, reason?: SkipState['reason']): SkipState {
+    Object.assign(this.state, { status, message, url: this.pageUrl || this.state.url, reason });
     this.emit();
+    return this.state;
+  }
+
+  /** Ходим по кругу: страница снова в уже виденном состоянии или кликов на ней слишком много. */
+  private looping(): boolean {
+    return this.loopHit || this.pageClicks >= this.cfg.maxPageClicks;
+  }
+
+  /** Запомнить состояние страницы; вернулись в уже виденное слишком много раз — петля. */
+  private noteState(obs: SkipObservation): void {
+    const sig = signature(obs);
+    const n = (this.seen.get(sig) ?? 0) + 1;
+    this.seen.set(sig, n);
+    if (n > this.cfg.maxSameState) this.loopHit = true;
   }
 
   /** Кнопки, которые можно жать, — по приоритету (см. rank), внутри приоритета снизу вверх. */
@@ -131,6 +159,11 @@ export class Skipper {
     return ok.map(([key]) => key);
   }
 
+  private progressed(): true {
+    this.state.progress = (this.state.progress ?? 0) + 1;
+    return true;
+  }
+
   private async observeAtBottom(): Promise<SkipObservation> {
     const first = await this.deps.observe();
     await this.deps.scrollToBottom(first.handle);
@@ -138,6 +171,9 @@ export class Skipper {
     if (obs.url !== this.pageUrl) {
       this.pageUrl = obs.url;
       this.pressed.clear();
+      this.seen.clear();
+      this.pageClicks = 0;
+      this.loopHit = false;
       this.state.pages++;
     }
     return obs;
@@ -150,26 +186,30 @@ export class Skipper {
     const before = signature(obs);
     this.pressed.set(key, (this.pressed.get(key) ?? 0) + 1);
     this.state.clicks++;
+    this.pageClicks++;
     this.state.last = el.line;
     this.emit();
     const res = await this.deps.click(el.index, obs.handle);
     await this.deps.sleep(this.cfg.settleMs);
-    if (res.navigated) return true;
+    if (res.navigated) return this.progressed();
     const after = await this.deps.observe();
-    return signature(after) !== before;
+    const changed = signature(after) !== before;
+    if (changed) this.noteState(after);
+    return changed && this.progressed();
   }
 
   async run(): Promise<SkipState> {
     this.emit();
     try {
       while (!this.stopped) {
-        if (this.state.clicks >= this.cfg.maxClicks) return (this.finish('done', `Достигнут предел кликов (${this.cfg.maxClicks}).`), this.state);
+        if (this.state.clicks >= this.cfg.maxClicks) return this.finish('done', `Достигнут предел кликов (${this.cfg.maxClicks}).`);
         let obs = await this.observeAtBottom();
         if (!this.startHost) this.startHost = hostOf(obs.url);
-        if (hostOf(obs.url) !== this.startHost) return (this.finish('done', `Ушли на другой сайт: ${obs.url}`), this.state);
+        if (hostOf(obs.url) !== this.startHost) return this.finish('done', `Ушли на другой сайт: ${obs.url}`);
+        if (this.looping()) return this.finish('stuck', 'Хожу по кругу: кнопки меняют страницу, но дальше она не продвигается.', 'loop');
 
         const order = this.candidates(obs);
-        if (order.length === 0) return (this.finish('stuck', 'На странице не осталось кнопок, которые можно нажать.'), this.state);
+        if (order.length === 0) return this.finish('stuck', 'На странице не осталось кнопок, которые можно нажать.', 'no-buttons');
 
         // 1. Нижняя кнопка (или «Далее»), несколько раз.
         const bottom = order[0]!;
@@ -200,7 +240,8 @@ export class Skipper {
           }
         }
         if (!progressed && !this.stopped) {
-          return (this.finish('stuck', 'Перебрал все кнопки снизу вверх — дальше не продвинуться. Посмотрите страницу.'), this.state);
+          if (this.looping()) return this.finish('stuck', 'Хожу по кругу: кнопки меняют страницу, но дальше она не продвигается.', 'loop');
+          return this.finish('stuck', 'Перебрал все кнопки снизу вверх — дальше не продвинуться.', 'exhausted');
         }
       }
       this.finish('stopped', 'Остановлено.');

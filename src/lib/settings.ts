@@ -55,6 +55,10 @@ export interface AgentSettings {
   useDebugger: boolean;
   showCursor: boolean;
   debugOverlay: boolean;
+  /** «Пролистать курс»: застряв, звать нейросеть, а когда она разберётся — листать дальше самому. */
+  skipWithAgent: boolean;
+  /** Сколько шагов даётся нейросети на одну заминку при пролистывании. */
+  skipAgentSteps: number;
 }
 
 export interface SafetySettings {
@@ -133,6 +137,8 @@ export const DEFAULT_SETTINGS: Settings = {
     stepTimeoutSec: 60,
     loopThreshold: 3,
     autoScrollAfter: 2,
+    skipWithAgent: true,
+    skipAgentSteps: 25,
     approveEachStep: false,
     maxObservationChars: 12000,
     autonomous: false,
@@ -229,6 +235,8 @@ function sanitizeAgent(raw: unknown, def: AgentSettings): AgentSettings {
     useDebugger: bool(r.useDebugger, def.useDebugger),
     showCursor: bool(r.showCursor, def.showCursor),
     debugOverlay: bool(r.debugOverlay, def.debugOverlay),
+    skipWithAgent: bool(r.skipWithAgent, def.skipWithAgent),
+    skipAgentSteps: num(r.skipAgentSteps, def.skipAgentSteps, 3, 200, true),
   };
 }
 

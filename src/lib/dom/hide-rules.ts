@@ -6,20 +6,30 @@
  */
 
 export const CSS_PREFIX = 'css:';
+/** Строка-переключатель: скрыть иконки без подписи на приклеенных панелях и в тренажёрах (iframe). */
+export const ICONS_RULE = '@иконки';
+const ICONS_ALIASES = new Set([ICONS_RULE, '@icons']);
 
 export interface HideRules {
   /** Текстовые правила в нижнем регистре. */
   texts: string[];
   /** CSS-селекторы (регистр важен). */
   selectors: string[];
+  /** «@иконки»: прятать кнопки-иконки без подписи на приклеенных панелях и во фреймах. */
+  icons?: boolean;
 }
 
 export function parseHideRules(lines: readonly string[]): HideRules {
   const texts: string[] = [];
   const selectors: string[] = [];
+  let icons = false;
   for (const raw of lines) {
     const line = raw.trim();
     if (!line) continue;
+    if (ICONS_ALIASES.has(line.toLowerCase())) {
+      icons = true;
+      continue;
+    }
     if (line.toLowerCase().startsWith(CSS_PREFIX)) {
       const sel = line.slice(CSS_PREFIX.length).trim();
       if (sel && isValidSelector(sel)) selectors.push(sel);
@@ -27,10 +37,10 @@ export function parseHideRules(lines: readonly string[]): HideRules {
       texts.push(line.toLowerCase());
     }
   }
-  return { texts, selectors };
+  return icons ? { texts, selectors, icons } : { texts, selectors };
 }
 
-export const hasRules = (r: HideRules): boolean => r.texts.length > 0 || r.selectors.length > 0;
+export const hasRules = (r: HideRules): boolean => r.texts.length > 0 || r.selectors.length > 0 || !!r.icons;
 
 function isValidSelector(sel: string): boolean {
   try {

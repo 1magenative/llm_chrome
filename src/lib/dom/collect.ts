@@ -143,8 +143,10 @@ interface WalkCtx {
   clickableAncestor: ClickableAncestor;
   parentCursor: string;
   inShadow: boolean;
-  /** Предок приклеен к экрану (position: fixed/sticky). */
+  /** Предок приклеен к экрану (position: fixed/sticky) или это окно поверх страницы. */
   pinned?: boolean;
+  /** Предок — приклеенная панель (fixed/sticky, не окно): меню, кнопка чата, панель инструментов. */
+  panel?: boolean;
 }
 
 export function intersect(a: Rect, b: Rect): Rect | null {
@@ -354,6 +356,13 @@ const SECRET_FIELDS = 'input[type=password], input[autocomplete^="cc-"], input[a
 const SEARCH_HINT = /search|поиск|найти|искать/i;
 
 /** Признаки для оценки риска (см. ElementFlag). */
+/** Кнопка без текста: одна картинка/svg/символ-иконка, без букв и цифр и без полей ввода внутри. */
+export function isIconOnly(el: Element): boolean {
+  if (/[\p{L}\p{N}]/u.test(el.textContent ?? '')) return false;
+  if (el.matches('input, select, textarea') || el.querySelector('input:not([type=checkbox]):not([type=radio]), select, textarea')) return false;
+  return true;
+}
+
 export function riskFlags(el: Element): ElementFlag[] {
   const flags: ElementFlag[] = [];
   const tag = el.localName;
@@ -737,12 +746,15 @@ export function collectSnapshot(doc: Document, geom: Geometry, opts: CollectOpti
    * Обёртка на весь экран (fixed-раскладка приложения, затемнение под окном) — не панель:
    * иначе всё содержимое страницы оказалось бы «приклеенным».
    */
-  const isPinnedBox = (el: Element, position: string | undefined): boolean => {
-    if (el.localName === 'dialog' || el.getAttribute('aria-modal') === 'true' || el.getAttribute('role') === 'dialog' || el.getAttribute('role') === 'alertdialog') return true;
+  const isDialogBox = (el: Element): boolean =>
+    el.localName === 'dialog' || el.getAttribute('aria-modal') === 'true' || el.getAttribute('role') === 'dialog' || el.getAttribute('role') === 'alertdialog';
+  const isPanelBox = (el: Element, position: string | undefined): boolean => {
     if (position !== 'fixed' && position !== 'sticky') return false;
+    if (isDialogBox(el)) return false;
     const r = geom.rect(el);
     return !(r.width >= vp.width * 0.9 && r.height >= vp.height * 0.9);
   };
+  const inFrameDoc = !!opts.frame;
 
   const visit = (el: Element, ctx: WalkCtx): void => {
     stats.nodesVisited++;
@@ -782,7 +794,14 @@ export function collectSnapshot(doc: Document, geom: Geometry, opts: CollectOpti
       trace?.set(el, { kind: 'skipped', reason: 'user-hidden' });
       return;
     }
-    const pinnedHere = !!ctx.pinned || isPinnedBox(el, style.position);
+    const panelHere = !!ctx.panel || isPanelBox(el, style.position);
+    const pinnedHere = !!ctx.pinned || panelHere || isDialogBox(el);
+    // «@иконки»: кнопки-иконки без подписи на приклеенных панелях и во фреймах (тренажёрах) не видны вовсе.
+    if (detected && !detected.editor && hideRules.icons && (panelHere || inFrameDoc || ctx.frames.length > 0) && isIconOnly(el)) {
+      stats.userHidden++;
+      trace?.set(el, { kind: 'skipped', reason: 'user-hidden' });
+      return;
+    }
     if (detected && !addCandidate(el, detected, pinnedHere ? { ...ctx, pinned: true } : ctx)) detected = null;
     if (!detected && trace && !trace.has(el)) {
       trace.set(el, { kind: 'not-interactive', cursor: style.cursor, parentCursor: ctx.parentCursor, clickableAncestor: ctx.clickableAncestor });
@@ -821,6 +840,7 @@ export function collectSnapshot(doc: Document, geom: Geometry, opts: CollectOpti
             : 'none',
       parentCursor: style.cursor,
       pinned: pinnedHere,
+      panel: panelHere,
     };
 
     const shadow = el.shadowRoot;

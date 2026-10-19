@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'preact/hooks';
 import { browser } from '#imports';
-import type { SkipState } from '@/lib/agent/skipper';
+import type { CourseState } from '@/lib/agent/course';
 import { isUiEvent, sendToBackground } from '@/lib/messages';
+import { saveSettings, type Settings } from '@/lib/settings';
 
-const LABELS: Record<SkipState['status'], string> = {
+const LABELS: Record<CourseState['status'], string> = {
   running: 'пролистываю',
   done: 'готово',
   stuck: 'застрял',
@@ -12,11 +13,12 @@ const LABELS: Record<SkipState['status'], string> = {
 };
 
 /**
- * Пролистывание курса без модели: вниз → нижняя кнопка, если не помогло — кнопки снизу вверх.
- * Для курсов, где содержимое можно не читать, а только жать «дальше».
+ * «Пролистать курс»: без модели — вниз, нижняя кнопка, затем кнопки снизу вверх.
+ * На заминке (нет кнопок, перебрал все, ходит по кругу) зовёт нейросеть, а когда она
+ * сдвинула курс с места — снова листает сам.
  */
-export function SkipPanel({ busy }: { busy: boolean }) {
-  const [state, setState] = useState<SkipState | null>(null);
+export function SkipPanel({ busy, settings }: { busy: boolean; settings: Settings }) {
+  const [state, setState] = useState<CourseState | null>(null);
   const [error, setError] = useState('');
 
   useEffect(() => {
@@ -29,6 +31,11 @@ export function SkipPanel({ busy }: { busy: boolean }) {
   }, []);
 
   const running = state?.status === 'running';
+  const agent = running && state.mode === 'agent';
+  // Идущий проход пролистывания ещё не учтён в общих счётчиках.
+  const live = running && state.mode === 'skip' && state.skip?.status === 'running' ? state.skip : null;
+  const clicks = (state?.clicks ?? 0) + (live?.clicks ?? 0);
+  const pages = (state?.pages ?? 0) + (live?.pages ?? 0);
 
   const start = async () => {
     setError('');
@@ -53,11 +60,22 @@ export function SkipPanel({ busy }: { busy: boolean }) {
         )}
         {state && (
           <span class="muted">
-            {LABELS[state.status]} · кликов {state.clicks} · страниц {state.pages}
+            {agent ? '🧠 разбирается нейросеть' : LABELS[state.status]} · кликов {clicks} · страниц {pages}
+            {state.handoffs > 0 && ` · нейросеть ×${state.handoffs}`}
           </span>
         )}
       </div>
-      {state?.last && running && <div class="muted mono runlog-task">{state.last}</div>}
+      <label class="check" title="Застряв (нет кнопок, все перебраны, хожу по кругу), пролистывание передаёт страницу нейросети. Как только курс сдвинулся — снова листает само">
+        <input
+          type="checkbox"
+          checked={settings.agent.skipWithAgent}
+          disabled={running}
+          onChange={(e) => void saveSettings({ ...settings, agent: { ...settings.agent, skipWithAgent: e.currentTarget.checked } })}
+        />
+        Застрял — звать нейросеть, потом листать дальше
+      </label>
+      {agent && state.note && <div class="muted">{state.note}</div>}
+      {live?.last && <div class="muted mono runlog-task">{live.last}</div>}
       {state?.message && !running && <div class={state.status === 'stuck' || state.status === 'failed' ? 'warn' : 'muted'}>{state.message}</div>}
       {error && <div class="err">{error}</div>}
     </div>

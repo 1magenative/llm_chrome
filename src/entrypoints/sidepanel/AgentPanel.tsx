@@ -232,7 +232,7 @@ export function AgentPanel({ task, settings }: { task: string; settings: Setting
         </details>
       )}
 
-      <SkipPanel busy={active || interrupted} />
+      <SkipPanel busy={active || interrupted} settings={settings} />
 
       <Queue busy={active || interrupted} />
 

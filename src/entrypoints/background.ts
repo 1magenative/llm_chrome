@@ -4,6 +4,7 @@ import { newBoundary, type TabInfo } from '@/lib/agent/prompt';
 import { resumeTask, sameUrl, type RunCheckpoint } from '@/lib/agent/queue';
 import { assessAction, sitePolicyFor } from '@/lib/agent/risk';
 import { Skipper, type SkipState } from '@/lib/agent/skipper';
+import { Course, type CourseState, type SolveResult } from '@/lib/agent/course';
 import { hiddenNamesFor, nextRulesFor, type SiteNote } from '@/lib/agent/site-notes';
 import { AgentRunner, type Observation, type RunConfig } from '@/lib/agent/runner';
 import type { StepEvent } from '@/lib/agent/step';
@@ -33,7 +34,7 @@ import { activeTab, isRestrictedUrl, observePage, setHighlight } from '@/lib/per
 import { activeProfile, loadSettings, type ProfileId, type Settings } from '@/lib/settings';
 import { executeAction, normalizeNavigateUrl, waitForTabLoad, type AgentTab, type ExecContext } from '@/lib/tab-actions';
 
-let current: { runner: AgentRunner; tab: AgentTab } | null = null;
+let current: { runner: AgentRunner; tab: AgentTab; finished: Promise<RunState> } | null = null;
 /** Запуск, прерванный перезапуском браузера/воркера, ждёт «Продолжить» в панели. */
 let interrupted: { checkpoint: RunCheckpoint; state: RunState } | null = null;
 
@@ -196,64 +197,123 @@ async function launch(settings: Settings, profileId: ProfileId, cfg: RunConfig, 
     restore,
   );
 
-  current = { runner, tab };
   interrupted = null;
   // Весь запуск (включая ожидание ответа человека) держим service worker живым.
   const stopKeepAlive = startKeepAlive();
-  void runner.run().finally(() => {
+  const finished = runner.run().finally(() => {
     stopKeepAlive();
     void debuggers?.detachAll();
     void clearCheckpoint();
   });
+  current = { runner, tab, finished };
   return runner.state;
 }
 
-// ——— пролистывание курса без модели ———
+// ——— пролистывание курса: без модели, а на заминках — нейросеть ———
 
-let skipping: { skipper: Skipper; state: SkipState } | null = null;
+let course: { course: Course; state: CourseState; skipper: Skipper | null } | null = null;
+
+const samePage = (a: string, b: string) => {
+  try {
+    const x = new URL(a);
+    const y = new URL(b);
+    return x.host === y.host && x.pathname.replace(/\/+$/, '') === y.pathname.replace(/\/+$/, '');
+  } catch {
+    return a === b;
+  }
+};
 
 async function startSkip(windowId: number): Promise<void> {
   ensureIdle();
   const settings = await loadSettings();
   const active = await activeTab(windowId);
   const tab: AgentTab = { tabId: active.id, windowId };
-  const debuggers = settings.agent.useDebugger ? new DebuggerSessions() : null;
-  const exec: ExecContext = {
-    tab,
-    cdp: debuggers ? (tabId) => debuggers.driverFor(tabId) : undefined,
-    cdpUnavailable: () => debuggers?.unavailableReason ?? '',
-    showCursor: settings.agent.showCursor,
+
+  /** Один проход пролистывания (новый Skipper каждый раз: счётчики страницы — заново). */
+  const skip = async (): Promise<SkipState> => {
+    const s = await loadSettings();
+    const debuggers = s.agent.useDebugger ? new DebuggerSessions() : null;
+    const exec: ExecContext = {
+      tab,
+      cdp: debuggers ? (tabId) => debuggers.driverFor(tabId) : undefined,
+      cdpUnavailable: () => debuggers?.unavailableReason ?? '',
+      showCursor: s.agent.showCursor,
+    };
+    const skipper = new Skipper({
+      observe: async () => {
+        const obs = await observeAgentTab(tab, s.agent.maxObservationChars, false, s.siteNotes);
+        return { url: obs.url, elements: obs.handle.elements ?? [], handle: obs.handle };
+      },
+      click: (index, handle) => executeAction({ action: 'click', index }, handle, exec),
+      scrollToBottom: async (handle) => {
+        for (let i = 0; i < 6; i++) {
+          const r = await executeAction({ action: 'scroll', direction: 'down', amount: 10 }, handle, exec);
+          if (!r.ok || /already at the bottom/.test(r.message)) break;
+        }
+      },
+      isRisky: (line, url) =>
+        assessAction({ action: { action: 'click', index: 1 }, target: line, flags: [], url, modelFlag: false, rules: s.safety.rules, policy: sitePolicyFor(url, s.siteNotes) })
+          .length > 0,
+      sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+      onState: (state) => course?.course.skipProgress(state),
+    });
+    if (course) course.skipper = skipper;
+    try {
+      return await skipper.run();
+    } finally {
+      if (course) course.skipper = null;
+      void debuggers?.detachAll();
+    }
   };
-  const skipper = new Skipper({
-    observe: async () => {
-      const obs = await observeAgentTab(tab, settings.agent.maxObservationChars, false, settings.siteNotes);
-      return { url: obs.url, elements: obs.handle.elements ?? [], handle: obs.handle };
+
+  /** Нейросеть разбирается с заминкой; ушли со страницы — останавливаем её, курс поехал. */
+  const solve = async (task: string, stuckUrl: string): Promise<SolveResult> => {
+    const s = await loadSettings();
+    const cfg = runConfig(s, task, { maxSteps: Math.min(s.agent.maxSteps, s.agent.skipAgentSteps) });
+    await launch(s, s.activeProfile, cfg, tab);
+    const run = current!;
+    let movedOn = false;
+    const watch = setInterval(() => {
+      void browser.tabs.get(tab.tabId).then(
+        (t) => {
+          if (t.url && stuckUrl && !samePage(t.url, stuckUrl) && !TERMINAL_STATUSES.has(run.runner.state.status)) {
+            movedOn = true;
+            run.runner.stop();
+          }
+        },
+        () => {},
+      );
+    }, 1500);
+    try {
+      const st = await run.finished;
+      return { status: st.status, result: st.result, error: st.error, movedOn };
+    } finally {
+      clearInterval(watch);
+    }
+  };
+
+  const c = new Course(
+    {
+      skip,
+      solve,
+      cancel: () => {
+        course?.skipper?.stop();
+        if (current && !TERMINAL_STATUSES.has(current.runner.state.status)) current.runner.stop();
+      },
+      onState: (state) => {
+        if (course) course.state = state;
+        broadcast({ type: 'ui:skip-state', state });
+      },
+      alert: (message) => void alertHuman('Пролистывание курса остановилось', message, settings.safety.sound),
     },
-    click: (index, handle) => executeAction({ action: 'click', index }, handle, exec),
-    scrollToBottom: async (handle) => {
-      for (let i = 0; i < 6; i++) {
-        const r = await executeAction({ action: 'scroll', direction: 'down', amount: 10 }, handle, exec);
-        if (!r.ok || /already at the bottom/.test(r.message)) break;
-      }
-    },
-    isRisky: (line, url) =>
-      assessAction({ action: { action: 'click', index: 1 }, target: line, flags: [], url, modelFlag: false, rules: settings.safety.rules, policy: sitePolicyFor(url, settings.siteNotes) })
-        .length > 0,
-    sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
-    onState: (state) => {
-      if (skipping) skipping.state = state;
-      broadcast({ type: 'ui:skip-state', state });
-    },
-  });
-  skipping = { skipper, state: skipper.state };
+    { withAgent: settings.agent.skipWithAgent, maxAgentPerPage: 2 },
+  );
+  course = { course: c, state: c.state, skipper: null };
   const stopKeepAlive = startKeepAlive();
-  void skipper.run().finally(() => {
-    stopKeepAlive();
-    void debuggers?.detachAll();
-  });
+  void c.run().finally(stopKeepAlive);
 }
 
-const skipRunning = () => skipping?.state.status === 'running';
+const skipRunning = () => course?.state.status === 'running';
 
 function ensureIdle(): void {
   if (skipRunning()) throw new Error('Идёт пролистывание — сначала остановите его.');
@@ -425,10 +485,10 @@ async function handle(msg: BackgroundRequest): Promise<Result<unknown>> {
       await startSkip(msg.windowId);
       return { ok: true, value: null };
     case 'bg:skip-stop':
-      skipping?.skipper.stop();
+      course?.course.stop();
       return { ok: true, value: null };
     case 'bg:skip-get':
-      return { ok: true, value: skipping?.state ?? null };
+      return { ok: true, value: course?.state ?? null };
     case 'bg:alert-test': {
       const settings = await loadSettings();
       await alertHuman('Проверка сигнала', 'Так агент позовёт вас, когда ночью упрётся в рискованное действие.', settings.safety.sound);

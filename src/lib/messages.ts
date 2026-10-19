@@ -1,5 +1,5 @@
 import { browser } from '#imports';
-import type { SkipState } from './agent/skipper';
+import type { CourseState } from './agent/course';
 import type { StepEvent } from './agent/step';
 import type { ActionResult, DeferredItem, RunState, RunSummary, StepDetail } from './agent/types';
 import type { ClickPoint } from './dom/act';
@@ -122,7 +122,7 @@ export type UiEvent =
   | { type: 'ui:step-progress'; event: StepEvent }
   | { type: 'ui:run-state'; info: RunInfo }
   | { type: 'ui:queue-changed' }
-  | { type: 'ui:skip-state'; state: SkipState };
+  | { type: 'ui:skip-state'; state: CourseState };
 
 export function isUiEvent(msg: unknown): msg is UiEvent {
   return hasType(msg, 'ui:');
@@ -166,7 +166,7 @@ export interface BackgroundResponses {
   'bg:alert-test': null;
   'bg:skip-start': null;
   'bg:skip-stop': null;
-  'bg:skip-get': SkipState | null;
+  'bg:skip-get': CourseState | null;
 }
 
 function hasType(msg: unknown, prefix: string): msg is { type: string } {
